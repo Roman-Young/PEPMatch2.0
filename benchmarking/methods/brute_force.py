@@ -95,6 +95,13 @@ def _search_one(query):
 
 
 class Benchmarker:
+  # search() reads the proteome structures that preprocess_proteome() builds in THIS
+  # process's memory. Unlike PEPMatch's .pepidx or the aligners' on-disk databases,
+  # there is no artifact to hand from one process to the next, so preprocessing and
+  # search memory cannot be measured independently. Declared rather than inferred so
+  # the harness reports "inseparable" instead of silently producing a wrong split.
+  search_requires_preprocess = True
+
   def __init__(self, benchmark, query, proteome, lengths, max_mismatches, method_parameters, indels=0):
     if indels <= 0:
       raise ValueError('Brute Force is an indel-only baseline.')

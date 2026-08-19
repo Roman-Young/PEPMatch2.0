@@ -23,11 +23,19 @@ RESULT_TABLE_COLUMNS = [
   'Searching (s)', 'Total (s)', 'Memory (MB)', 'Recall (%)', 'Status',
 ]
 
-# The memory table reports the headline figure PLUS every raw component it was derived
-# from, so the baseline subtraction can be audited instead of taken on trust.
+# Memory is split the same way the timing table is split, because preprocessing is a
+# one-time amortised cost while search is paid per query. 'Peak total' is measured
+# end-to-end rather than derived, since the true peak can exceed max(phases).
 MEMORY_TABLE_COLUMNS = [
-  'Method', 'Memory (MB)', 'Peak RSS self (MB)', 'Peak RSS child (MB)',
-  'Python baseline (MB)', 'Import cost (MB)', 'External binary', 'Status',
+  'Method', 'Preprocessing (MB)', 'Search (MB)', 'Peak total (MB)',
+  'External binary', 'Status',
+]
+
+# Full per-phase components, written beside the table so the baseline subtraction can
+# be audited rather than taken on trust.
+MEMORY_DETAIL_COLUMNS = [
+  'Method', 'Phase', 'Memory (MB)', 'Peak RSS self (MB)', 'Peak RSS child (MB)',
+  'Python baseline (MB)', 'Import cost (MB)', 'External binary',
 ]
 
 
@@ -176,8 +184,8 @@ def external_tool_runs():
     return 0
 
 
-def measure_memory(benchmark, method_index, threads):
-  """Peak memory for ONE method, measured in a fresh subprocess. Returns a dict.
+def measure_memory(benchmark, method_index, threads, phase='all'):
+  """Peak memory for ONE method in ONE phase, measured in a fresh subprocess.
 
   Takes the method's INDEX rather than its name: a method may be registered more than
   once with different parameters (BLAST runs in both blastp-short and default modes),
@@ -188,7 +196,8 @@ def measure_memory(benchmark, method_index, threads):
   """
   proc = subprocess.run(
     [sys.executable, __file__, '-b', benchmark,
-     '--mem-index', str(method_index), '--threads', str(threads)],
+     '--mem-index', str(method_index), '--mem-phase', phase,
+     '--threads', str(threads)],
     capture_output=True, text=True, env=os.environ,
   )
 
@@ -208,9 +217,25 @@ def measure_memory(benchmark, method_index, threads):
   return payload
 
 
-def run_single_method_memory(benchmark, method_index, threads):
-  """Internal entry point (--mem-index): run one method end to end in a clean process
-  and report its memory as a single `MEM_JSON={...}` line.
+def run_single_method_memory(benchmark, method_index, threads, phase='all'):
+  """Internal entry point (--mem-index): run one method in a clean process and report
+  its memory as a single `MEM_JSON={...}` line.
+
+  PHASES. Preprocessing is a one-time cost that is amortised away in real use, while
+  search is paid per query, so collapsing them into one peak answers a question nobody
+  asks -- and it understates any tool whose cost is front-loaded into an index build.
+  The phases are measured in SEPARATE processes because peak RSS is a high-water mark
+  that cannot be reset within a process:
+    'preprocess' -- build the index/database only, and deliberately do NOT clean up, so
+                    the artifact survives for the search phase to use.
+    'search'     -- search against the artifact the preprocess phase left behind.
+    'all'        -- the authoritative end-to-end peak. Kept because the true
+                    single-process peak can exceed max(preprocess, search) when
+                    preprocessing memory is not released before searching, so max()
+                    alone would only be a lower bound.
+  Methods declaring `search_requires_preprocess` (brute force: its proteome lives in
+  this process's memory with no on-disk handoff) report 'inseparable' for the split
+  phases rather than a fabricated number.
 
   WHY THIS IS NOT JUST max(self, children):
 
@@ -258,16 +283,25 @@ def run_single_method_memory(benchmark, method_index, threads):
     after_import_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     label = str(tool)
 
+    if getattr(tool, 'search_requires_preprocess', False) and phase != 'all':
+      print('MEM_JSON=' + json.dumps({'inseparable': True, 'label': label}))
+      return
+
     # Same step semantics as the timed run: preprocessing may be inapplicable, but a
     # crash in search is a real failure and must propagate.
-    for step in (tool.preprocess_proteome, tool.preprocess_query):
-      try:
-        step()
-      except (StepNotApplicable, TypeError):
-        pass
-    tool.search()
-    if hasattr(tool, 'cleanup'):
-      tool.cleanup()
+    if phase in ('all', 'preprocess'):
+      for step in (tool.preprocess_proteome, tool.preprocess_query):
+        try:
+          step()
+        except (StepNotApplicable, TypeError):
+          pass
+
+    if phase in ('all', 'search'):
+      tool.search()
+      # Cleanup only ever runs in a phase that searched, so the 'preprocess' phase
+      # leaves its index/database in place for the 'search' phase to consume.
+      if hasattr(tool, 'cleanup'):
+        tool.cleanup()
 
     self_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     child_kb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
@@ -280,6 +314,7 @@ def run_single_method_memory(benchmark, method_index, threads):
 
     print('MEM_JSON=' + json.dumps({
       'label': label,
+      'phase': phase,
       'memory_mb': round(max(reported_kb, 0) / KB_PER_MB, 1),
       'self_peak_mb': round(self_kb / KB_PER_MB, 1),
       'child_peak_mb': round(child_kb / KB_PER_MB, 1),
@@ -417,6 +452,15 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
   return results
 
 
+def phase_cell(phase_results, phase):
+  """Render one phase's figure for the memory table, distinguishing 'this method cannot
+  be split' from 'this phase produced no number'."""
+  p = phase_results.get(phase, {})
+  if p.get('inseparable'):
+    return 'inseparable'
+  return f'{p["memory_mb"]:.1f}' if 'memory_mb' in p else 'N/A'
+
+
 def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
   """Produce the MEMORY table only, without redoing the timing run.
 
@@ -433,8 +477,11 @@ def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
   pin_threads(threads)
 
   rows = []
+  detail_rows = []
   output_path = str(Path(__file__).parent / f'{benchmark}_memory.tsv')
+  detail_path = str(Path(__file__).parent / f'{benchmark}_memory_detail.tsv')
   Path(output_path).unlink(missing_ok=True)
+  Path(detail_path).unlink(missing_ok=True)
 
   for method_index, method in methods:
     label = method.get('label', method['name'])
@@ -444,28 +491,49 @@ def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
     sys.stdout.flush()
 
     try:
-      payload = measure_memory(benchmark, method_index, threads)
-      if payload.get('skipped'):
+      # Order matters: 'preprocess' leaves its index/database behind for 'search' to
+      # consume, then 'all' rebuilds from scratch for the authoritative end-to-end peak.
+      phase_results = {}
+      for phase in ('preprocess', 'search', 'all'):
+        payload = measure_memory(benchmark, method_index, threads, phase)
+        phase_results[phase] = payload
+
+        if payload.get('skipped'):
+          print(f'  {phase:<10} -> SKIPPED (not applicable to this dataset)')
+          break
+        if payload.get('inseparable'):
+          print(f'  {phase:<10} -> inseparable (search needs preprocessing in-process)')
+          continue
+
+        print(f'  {phase:<10} -> {payload["memory_mb"]:.1f} MB '
+              f'(self {payload["self_peak_mb"]:.1f} / child {payload["child_peak_mb"]:.1f} / '
+              f'baseline {payload["baseline_mb"]:.1f})')
+        append_row(detail_rows, detail_path, {
+          'Method': payload['label'],
+          'Phase': phase,
+          'Memory (MB)': f'{payload["memory_mb"]:.1f}',
+          'Peak RSS self (MB)': f'{payload["self_peak_mb"]:.1f}',
+          'Peak RSS child (MB)': f'{payload["child_peak_mb"]:.1f}',
+          'Python baseline (MB)': f'{payload["baseline_mb"]:.1f}',
+          'Import cost (MB)': f'{payload["import_cost_mb"]:.1f}',
+          'External binary': 'yes' if payload['external_tool'] else 'no',
+        }, MEMORY_DETAIL_COLUMNS)
+        sys.stdout.flush()
+
+      if phase_results.get('preprocess', {}).get('skipped'):
         append_row(rows, output_path,
                    failed_row(label, 'SKIPPED', 'not applicable to this dataset',
                               MEMORY_TABLE_COLUMNS),
                    MEMORY_TABLE_COLUMNS)
-        print('  -> SKIPPED')
         continue
 
-      print(f'  -> {payload["memory_mb"]:.1f} MB '
-            f'(self {payload["self_peak_mb"]:.1f} / child {payload["child_peak_mb"]:.1f} / '
-            f'baseline {payload["baseline_mb"]:.1f}, '
-            f'external={payload["external_tool"]})')
-
+      total = phase_results['all']
       append_row(rows, output_path, {
-        'Method': payload['label'],
-        'Memory (MB)': f'{payload["memory_mb"]:.1f}',
-        'Peak RSS self (MB)': f'{payload["self_peak_mb"]:.1f}',
-        'Peak RSS child (MB)': f'{payload["child_peak_mb"]:.1f}',
-        'Python baseline (MB)': f'{payload["baseline_mb"]:.1f}',
-        'Import cost (MB)': f'{payload["import_cost_mb"]:.1f}',
-        'External binary': 'yes' if payload['external_tool'] else 'no',
+        'Method': total['label'],
+        'Preprocessing (MB)': phase_cell(phase_results, 'preprocess'),
+        'Search (MB)': phase_cell(phase_results, 'search'),
+        'Peak total (MB)': f'{total["memory_mb"]:.1f}',
+        'External binary': 'yes' if total['external_tool'] else 'no',
         'Status': 'OK',
       }, MEMORY_TABLE_COLUMNS)
     except Exception as e:  # noqa: BLE001 -- one method must not end the run
@@ -484,7 +552,11 @@ def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
   print(results.to_string(index=False))
 
   results.to_csv(output_path, sep='\t', index=False)
+  pd.DataFrame(detail_rows, columns=MEMORY_DETAIL_COLUMNS).to_csv(
+    detail_path, sep='\t', index=False
+  )
   print(f'\nSaved to {output_path}')
+  print(f'Per-phase components in {detail_path}')
 
   failures = [r['Method'] for r in rows if r.get('Status', 'OK') != 'OK']
   if failures:
@@ -492,8 +564,11 @@ def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
   else:
     print(f'All {len(rows)} methods reported memory successfully.')
   print('\nReported memory = peak RSS attributable to the method, EXCLUDING the shared '
-        'Python interpreter baseline.\nRaw components are in the table so the reduction '
-        'can be checked.')
+        'Python interpreter baseline.')
+  print('Preprocessing and Search are measured in separate processes (peak RSS cannot '
+        'be reset within one).')
+  print('Peak total is measured end-to-end, not derived, because the true peak can '
+        'exceed max(phases).')
 
   return results
 
@@ -523,10 +598,12 @@ def main():
   # Internal: measure one method's memory in a fresh process. Selected by INDEX, not
   # name, because a method can be registered twice (BLAST short vs default).
   parser.add_argument('--mem-index', type=int, default=None, help=argparse.SUPPRESS)
+  parser.add_argument('--mem-phase', choices=['all', 'preprocess', 'search'],
+                      default='all', help=argparse.SUPPRESS)
   args = parser.parse_args()
 
   if args.mem_index is not None:
-    run_single_method_memory(args.benchmark, args.mem_index, args.threads)
+    run_single_method_memory(args.benchmark, args.mem_index, args.threads, args.mem_phase)
     return
 
   if args.memory_only:

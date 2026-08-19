@@ -25,9 +25,15 @@
 # made the two in-process methods collapse onto an identical number dominated by that
 # floor. Every raw component is written to the table so the subtraction can be audited.
 #
-# RUNTIME: roughly the sum of every method's full runtime. On COSMIC that is dominated
-# by BLAST (~96 min short + ~31 min default) plus brute force (~12 min), so budget
-# ~2.5-3h; the 12h limit is deliberate headroom.
+# PHASES: memory is split into preprocessing and search (mirroring the timing table),
+# because preprocessing is a one-time amortised cost while search is paid per query.
+# Each is measured in its own process -- peak RSS is a high-water mark that cannot be
+# reset within a process -- plus a third end-to-end run for the authoritative total,
+# since the true peak can exceed max(phases).
+#
+# RUNTIME: three phases means roughly twice the work of a single pass. On COSMIC that
+# is dominated by BLAST (~96 min short + ~31 min default, each searched twice), so
+# budget ~5h; the 12h limit is deliberate headroom.
 
 set -euo pipefail
 
