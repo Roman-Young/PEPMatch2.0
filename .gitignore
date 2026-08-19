@@ -1,6 +1,7 @@
 .~*
 *.db
 *.pepidx
+*.pepidx.chunk_*
 *.pickle
 *.pkl
 *.pyc
@@ -27,6 +28,7 @@ proteomes/*.ptf
 proteomes/*.pto
 proteomes/*.pickle
 benchmarking.xlsx
+benchmarking/*_benchmarking.tsv
 notes.txt
 pepmatch.py
 test.csv

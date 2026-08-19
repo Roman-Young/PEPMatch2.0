@@ -27,6 +27,22 @@
                         "query": "queries/neoepitopes-test.fasta",
                         "proteome": "proteomes/human.fasta",
                         "expected": "expected/neoepitopes-expected.tsv"
+                },
+                "cosmic_indel": {
+                        "lengths": [9],
+                        "mismatches": 1,
+                        "indels": 1,
+                        "query": "queries/cosmic-indel-test.fasta",
+                        "proteome": "proteomes/human.fasta",
+                        "expected": "expected/cosmic-indel-expected.tsv"
+                },
+                "cedar_indel": {
+                        "lengths": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 23, 25, 26],
+                        "mismatches": 1,
+                        "indels": 1,
+                        "query": "queries/cedar-indel-test.fasta",
+                        "proteome": "proteomes/human.fasta",
+                        "expected": "expected/cedar-indel-expected.tsv"
                 }
         },
        
@@ -39,35 +55,29 @@
                         }
                 },
                 {
-                        "name": "NmerMatch",
+                        "name": "brute_force",
                         "text_shifting": 0,
-                        "method_parameters":{
-                                "nmer_script_path": "NmerMatch/bin/run_nmer_match.pl",
-                                "perl_exe": "",
-                                "perl_include_path": "",
-                                "catalog_master_dir": "",
-                                "output_master_dir": ""
-                        }
+                        "method_parameters":{}
                 },
                 {
                         "name": "blast",
                         "text_shifting": 0,
                         "method_parameters":{
-                                "bin_directory": "../bin"
+                                "bin_directory": ""
                         }
                 },
                 {
                         "name": "diamond",
                         "text_shifting": 0,
                         "method_parameters":{
-                                "bin_directory": "../bin"
+                                "bin_directory": ""
                         }
                 },
                 {
                         "name": "mmseqs2",
                         "text_shifting": 0,
                         "method_parameters":{
-                                "bin_directory": "../bin/"
+                                "bin_directory": ""
                         }
                 },
                 {
