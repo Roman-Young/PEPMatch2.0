@@ -5,6 +5,8 @@ import glob
 import shutil
 import pandas as pd
 
+from _shell import run_tool
+
 
 directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -28,15 +30,28 @@ class MMseqs2(object):
     return 'MMseqs2'
 
   def preprocesss(self):
-    os.system(f"{self.bin_file} createdb {self.proteome} {self.proteome_name}")
-    os.system(f"{self.bin_file} createindex {self.proteome_name} tmp --threads {self.threads}")
+    run_tool(f"{self.bin_file} createdb {self.proteome} {self.proteome_name}", 'mmseqs-createdb')
+    # --mask 0 here too: the index stores masked residues, so masking must be off at
+    # build time as well as search time for the masking-off policy to actually hold.
+    run_tool(
+      f"{self.bin_file} createindex {self.proteome_name} tmp "
+      f"--threads {self.threads} --mask 0",
+      'mmseqs-createindex',
+    )
 
   def mmseqs_search(self):
     # Tuned for maximum recall: highest sensitivity, uncap results per query.
-    os.system(
+    # --mask 0 / --comp-bias-corr 0 mirror DIAMOND's --masking 0 / --comp-based-stats 0.
+    # Both default to ON in MMseqs2 and would otherwise suppress the low-complexity
+    # queries (COSMIC contains literal homopolymers such as AAAAAAAAA), leaving MMseqs2
+    # handicapped relative to the other tools. Every tool runs masking-off so the
+    # comparison is symmetric.
+    run_tool(
       f"{self.bin_file} easy-search {self.query} {self.proteome_name} "
       f"results.m8 tmp -s 7.5 -e 10000 --max-seqs 100000 --threads {self.threads} "
-      "--format-output \"qseq,taln,theader,mismatch,tstart\""
+      f"--mask 0 --comp-bias-corr 0 "
+      "--format-output \"qseq,taln,theader,mismatch,tstart\"",
+      'mmseqs-easy-search',
     )
 
     all_matches = []

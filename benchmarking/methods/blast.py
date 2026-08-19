@@ -6,6 +6,8 @@ import pandas as pd
 
 from Bio import SeqIO
 
+from _shell import run_tool
+
 
 directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -24,16 +26,22 @@ class BLAST(object):
     self.max_mismatches = max_mismatches
     self.indels = indels
     self.threads = int(method_parameters.get('threads', 1))
+    # BLAST is benchmarked in BOTH modes as separate rows: 'blastp-short' switches to a
+    # PAM30 matrix and a shorter word size for peptide-length queries, while plain
+    # 'blastp' is tuned for full-length proteins. Reporting both shows the reader
+    # directly how much of BLAST's performance on short peptides comes from picking the
+    # right task, instead of hiding that choice in a methods footnote.
+    self.task = method_parameters.get('task', 'blastp-short')
 
     bin_directory = method_parameters['bin_directory']
     self.makeblastdb_path = os.path.join(bin_directory, 'makeblastdb')
     self.blastp_path = os.path.join(bin_directory, 'blastp')
 
   def __str__(self):
-    return 'BLAST'
+    return f'BLAST ({self.task})'
 
   def preprocess(self):
-    os.system(f"{self.makeblastdb_path} -in {self.proteome} -dbtype prot")
+    run_tool(f"{self.makeblastdb_path} -in {self.proteome} -dbtype prot", 'blast-makeblastdb')
 
   def blast_search(self):
     peptides = parse_fasta(self.query)
@@ -51,18 +59,19 @@ class BLAST(object):
         protein_dict[str(protein.id)] = str(protein.seq)
 
     # NcbiblastpCommandline was removed in Biopython 1.80, so call blastp directly.
-    # Tuned for maximum recall on short peptides: blastp-short (the correct task for
-    # short queries -- default blastp is built for long proteins), uncapped targets,
-    # no composition-based score adjustment.
+    # Tuned for maximum recall: uncapped targets, no composition-based score adjustment.
+    # self.task selects blastp-short (peptide-appropriate) vs blastp (protein default).
     evalue = 100 if self.max_mismatches == 0 else 10000
-    os.system(
+    out_csv = f'output-{self.task}.csv'   # distinct per task so the two rows can't collide
+    run_tool(
       f"{self.blastp_path} -query {self.query} -db {self.proteome} "
-      f"-task blastp-short -evalue {evalue} -max_target_seqs 100000 "
-      f"-comp_based_stats 0 -num_threads {self.threads} -outfmt 10 -out output.csv"
+      f"-task {self.task} -evalue {evalue} -max_target_seqs 100000 "
+      f"-comp_based_stats 0 -num_threads {self.threads} -outfmt 10 -out {out_csv}",
+      f'blast-{self.task}',
     )
 
     df = pd.read_csv(
-      'output.csv',
+      out_csv,
       names=[
         'Peptide Sequence', 'Protein ID', 'Sequence Identity',
         'Length', 'Mismatches', 'Gap Openings', 'Query start',
@@ -111,7 +120,10 @@ class Benchmarker(BLAST):
     super().__init__(query, proteome, max_mismatches, method_parameters, indels)
 
   def __str__(self):
-    return 'BLAST'
+    # BLAST is benchmarked in two modes as separate rows, so the label must name the
+    # mode or the two rows are indistinguishable in the results table.
+    mode = 'short' if self.task == 'blastp-short' else 'default'
+    return f'BLAST ({mode})'
 
   def preprocess_proteome(self):
     return self.preprocess()
@@ -142,7 +154,7 @@ class Benchmarker(BLAST):
           os.remove(f)
         except OSError:
           pass
-    for f in ['output.csv']:
+    for f in [f'output-{self.task}.csv']:
       try:
         os.remove(f)
       except OSError:

@@ -57,12 +57,32 @@ def _proteins_containing(sub):
 
 
 def _pieces(query, k):
+  # The pigeonhole guarantee needs k NON-EMPTY pieces: n indels damage at most n of
+  # them, so at least one survives verbatim. If len(query) < k the step collapses to 0
+  # and every piece but the last is empty, leaving a single effective bucket -- the
+  # guarantee degrades silently and true matches are dropped with no error, corrupting
+  # the ground truth this baseline exists to provide. Unreachable for the shipped
+  # 1-indel datasets (min query length 8); guarded so it fails loud if that changes.
+  if len(query) < k:
+    raise ValueError(
+      f'Query {query!r} (length {len(query)}) is shorter than the {k} pigeonhole '
+      f'pieces required for {k - 1} indel(s); the prefilter would be unsound.'
+    )
   step = len(query) // k
   cuts = [i * step for i in range(k)] + [len(query)]
   return [query[cuts[i]:cuts[i + 1]] for i in range(k)]
 
 
 def _search_one(query):
+  # The proteome reaches Pool workers through fork's copy-on-write snapshot. Under a
+  # 'spawn' start method the workers would re-import this module with empty globals and
+  # every query would return no candidates -- 0% recall reported as a clean success.
+  # Fail loud instead.
+  if not _CONCAT:
+    raise RuntimeError(
+      'Proteome globals are empty in this worker: preprocess_proteome did not run here '
+      '(non-fork multiprocessing start method?). Refusing to report a silent 0%.'
+    )
   cands = set()
   for piece in _pieces(query, _N + 1):
     cands |= _proteins_containing(piece)

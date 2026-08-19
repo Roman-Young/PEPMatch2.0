@@ -61,9 +61,20 @@
                 },
                 {
                         "name": "blast",
+                        "label": "blast (short)",
                         "text_shifting": 0,
                         "method_parameters":{
-                                "bin_directory": ""
+                                "bin_directory": "",
+                                "task": "blastp-short"
+                        }
+                },
+                {
+                        "name": "blast",
+                        "label": "blast (default)",
+                        "text_shifting": 0,
+                        "method_parameters":{
+                                "bin_directory": "",
+                                "task": "blastp"
                         }
                 },
                 {

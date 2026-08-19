@@ -5,6 +5,8 @@ import glob
 import pandas as pd
 from Bio import SeqIO
 
+from _shell import run_tool
+
 
 directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -32,9 +34,10 @@ class DIAMOND(object):
     return 'DIAMOND'
 
   def preprocesss(self):
-    os.system(
+    run_tool(
       f"{self.bin_file} makedb --in {self.proteome} -d {self.proteome_name} "
-      f"--threads {self.threads}"
+      f"--threads {self.threads}",
+      'diamond-makedb',
     )
 
   def diamond_search(self):
@@ -42,11 +45,12 @@ class DIAMOND(object):
     # masking off, no composition-based score adjustment.
     # --ignore-warnings: low-complexity peptides (e.g. poly-A/poly-C) are all valid DNA
     # letters, so DIAMOND misdetects the input as nucleotide and aborts without it.
-    os.system(
+    run_tool(
       f"{self.bin_file} blastp -d {self.proteome_name} -q {self.query} -o matches.m8 "
       f"-e 10000 -k 0 --ultra-sensitive --masking 0 --comp-based-stats 0 --ignore-warnings "
       f"--threads {self.threads} -f 6 "
-       "full_qseq sseq sseqid mismatch sstart"
+       "full_qseq sseq sseqid mismatch sstart",
+      'diamond-blastp',
     )
 
     all_matches = []

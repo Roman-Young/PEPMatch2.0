@@ -7,6 +7,7 @@ import resource
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import pandas as pd
@@ -17,10 +18,41 @@ if METHODS_DIR not in sys.path:
 
 RESULT_COLUMNS = ['Query Sequence', 'Matched Sequence', 'Protein ID', 'Index start']
 
+RESULT_TABLE_COLUMNS = [
+  'Method', 'Proteome Preprocessing (s)', 'Query Preprocessing (s)',
+  'Searching (s)', 'Total (s)', 'Memory (MB)', 'Recall (%)', 'Status',
+]
+
+
+class StepNotApplicable(Exception):
+  """Raised by a wrapper for a step it legitimately does not perform (e.g. tools
+  that do not preprocess queries).
+
+  This exists because "step not applicable" and "step crashed" used to be the same
+  signal: time_step caught bare TypeError, so a genuine TypeError bug inside search()
+  was swallowed, the method was dropped from the table, and the only trace was a log
+  line that looked exactly like the normal N/A prints. A missing row in a published
+  table must never be that easy to produce.
+  """
+
 
 def load_config():
   with open(Path(__file__).parent / 'benchmarking_parameters.json') as f:
     return json.load(f)
+
+
+def resolve_proteome(dataset):
+  """Where to read the proteome from.
+
+  BLAST/DIAMOND/MMseqs2 all write their databases NEXT TO the proteome file, and an
+  MMseqs2 index over the human proteome runs to multiple GB. On a cluster that would
+  land on the home quota. Setting PEPMATCH_BENCH_PROTEOME_DIR to a scratch copy moves
+  every generated database there, leaving only the (tiny) results tables in home.
+  """
+  override = os.environ.get('PEPMATCH_BENCH_PROTEOME_DIR')
+  if override:
+    return Path(override) / Path(dataset['proteome']).name
+  return Path(__file__).parent / dataset['proteome']
 
 
 def load_method(name, benchmark, dataset, method_params):
@@ -33,7 +65,7 @@ def load_method(name, benchmark, dataset, method_params):
     kwargs = dict(
       benchmark=benchmark,
       query=Path(__file__).parent / dataset['query'],
-      proteome=Path(__file__).parent / dataset['proteome'],
+      proteome=resolve_proteome(dataset),
       lengths=dataset['lengths'],
       max_mismatches=dataset['mismatches'],
       method_parameters=method_params,
@@ -66,13 +98,50 @@ def with_threads(method_params, threads):
   return dict(method_params, threads=threads)
 
 
-def time_step(fn):
+def failed_row(name, status, detail):
+  """A table row recording that a method did not produce results, and why."""
+  row = {c: 'N/A' for c in RESULT_TABLE_COLUMNS}
+  row['Method'] = name
+  row['Status'] = f'{status}: {detail}'
+  return row
+
+
+def append_row(rows, output_path, row):
+  """Append one method's row to the in-memory table AND flush it to disk immediately.
+
+  Writing only at the end meant a wall-clock kill produced no output at all; now a
+  truncated run still yields a partial table of everything that finished.
+  """
+  rows.append(row)
+  write_header = not Path(output_path).exists()
+  pd.DataFrame([row], columns=RESULT_TABLE_COLUMNS).to_csv(
+    output_path, sep='\t', index=False, mode='a', header=write_header
+  )
+
+
+def time_optional_step(fn):
+  """Time a step a tool may legitimately not implement (the preprocessing steps).
+
+  StepNotApplicable is the intended signal; bare TypeError is still accepted because
+  the existing wrappers raise it for 'does not preprocess queries'.
+  """
   try:
     start = time.perf_counter()
     result = fn()
     return time.perf_counter() - start, result
-  except TypeError:
+  except (StepNotApplicable, TypeError):
     return None, None
+
+
+def time_required_step(fn):
+  """Time a step every tool must implement (search).
+
+  Deliberately does NOT swallow exceptions: a crash here is a real failure and must
+  reach the per-method handler so it is recorded as FAILED rather than vanishing.
+  """
+  start = time.perf_counter()
+  result = fn()
+  return time.perf_counter() - start, result
 
 
 def recall(results_df, expected_df):
@@ -151,24 +220,35 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
   )
 
   rows = []
+  output_path = str(Path(__file__).parent / f'{benchmark}_benchmarking.tsv')
+  # Start clean, then append after every method. A SLURM wall-clock kill mid-run used
+  # to lose everything, including methods that had already finished hours earlier.
+  Path(output_path).unlink(missing_ok=True)
 
   for method in methods:
     name = method['name']
+    # A method may appear more than once with different parameters (e.g. BLAST is run
+    # in both blastp-short and default blastp modes), so `label` is what identifies the
+    # row; it falls back to the module name for single-configuration methods.
+    label = method.get('label', name)
     print(f'\n{"=" * 60}')
-    print(f'  {name}')
+    print(f'  {label}')
     print(f'{"=" * 60}')
+    sys.stdout.flush()
 
     # One failing method must never take down the whole run: the real timed run
     # happens on the cluster where the driver cannot be debugged live, so a tool
-    # that crashes (missing binary, segfault, bad output) is skipped, not fatal.
+    # that crashes (missing binary, segfault, bad output) is recorded as FAILED
+    # and the run continues.
     try:
       tool = load_method(name, benchmark, dataset, with_threads(method['method_parameters'], threads))
       if tool is None:
+        append_row(rows, output_path, failed_row(label, 'SKIPPED', 'not applicable to this dataset'))
         continue
 
       # preprocess proteome
       print('  Preprocessing proteome...')
-      preprocess_proteome_time, _ = time_step(tool.preprocess_proteome)
+      preprocess_proteome_time, _ = time_optional_step(tool.preprocess_proteome)
       if preprocess_proteome_time is not None:
         print(f'  -> {preprocess_proteome_time:.3f}s')
       else:
@@ -176,21 +256,21 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
 
       # preprocess query
       print('  Preprocessing query...')
-      preprocess_query_time, _ = time_step(tool.preprocess_query)
+      preprocess_query_time, _ = time_optional_step(tool.preprocess_query)
       if preprocess_query_time is not None:
         print(f'  -> {preprocess_query_time:.3f}s')
       else:
         print('  -> N/A')
 
-      # search
+      # search -- required; a crash here propagates and is recorded as FAILED
       print('  Searching...')
-      search_time, results_df = time_step(tool.search)
+      search_time, results_df = time_required_step(tool.search)
       print(f'  -> {search_time:.3f}s')
 
       # total
       total = sum(t for t in [preprocess_proteome_time, preprocess_query_time, search_time] if t is not None)
 
-      # memory (fresh subprocess; fair across Python/Rust/subprocess tools)
+      # memory (fresh subprocess; off by default -- see measure_peak_rss_mb)
       memory = None
       if include_memory:
         print('  Measuring memory...')
@@ -208,7 +288,7 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
       if hasattr(tool, 'cleanup'):
         tool.cleanup()
 
-      rows.append({
+      append_row(rows, output_path, {
         'Method': str(tool),
         'Proteome Preprocessing (s)': f'{preprocess_proteome_time:.3f}' if preprocess_proteome_time is not None else 'N/A',
         'Query Preprocessing (s)': f'{preprocess_query_time:.3f}' if preprocess_query_time is not None else 'N/A',
@@ -216,21 +296,36 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
         'Total (s)': f'{total:.3f}',
         'Memory (MB)': f'{memory:.1f}' if memory is not None else 'N/A',
         'Recall (%)': f'{recall_pct:.1f}',
+        'Status': 'OK',
       })
     except Exception as e:  # noqa: BLE001 -- deliberately broad; keep the run alive
-      print(f'  !! {name} failed, skipping: {type(e).__name__}: {e}')
+      detail = f'{type(e).__name__}: {e}'
+      print(f'  !! {label} FAILED: {detail}')
+      traceback.print_exc()
+      # Record the failure IN THE TABLE. A silently missing row is indistinguishable
+      # from a method that was never run, which is exactly how a bad table gets published.
+      append_row(rows, output_path, failed_row(label, 'FAILED', detail))
       continue
 
-  results = pd.DataFrame(rows)
+  results = pd.DataFrame(rows, columns=RESULT_TABLE_COLUMNS)
 
   print(f'\n\n{"=" * 80}')
   print(f'  {benchmark.upper()} RESULTS')
   print(f'{"=" * 80}\n')
   print(results.to_string(index=False))
 
-  output_path = f'{benchmark}_benchmarking.tsv'
+  # The table is already on disk (written incrementally); rewrite it once so the
+  # final file is clean, then state plainly whether every method actually reported.
   results.to_csv(output_path, sep='\t', index=False)
   print(f'\nSaved to {output_path}')
+
+  failures = [r['Method'] for r in rows if r.get('Status', 'OK') != 'OK']
+  if len(rows) != len(methods):
+    print(f'\n!! INCOMPLETE: {len(rows)} rows for {len(methods)} methods -- rows were lost.')
+  if failures:
+    print(f'!! {len(failures)} method(s) did not produce results: {", ".join(failures)}')
+  else:
+    print(f'All {len(rows)} methods reported successfully.')
 
   return results
 
