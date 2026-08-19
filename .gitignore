@@ -29,6 +29,7 @@ proteomes/*.pto
 proteomes/*.pickle
 benchmarking.xlsx
 benchmarking/*_benchmarking.tsv
+benchmarking/*_memory.tsv
 benchmarking/*.log
 notes.txt
 pepmatch.py

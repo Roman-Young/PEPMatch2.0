@@ -23,6 +23,13 @@ RESULT_TABLE_COLUMNS = [
   'Searching (s)', 'Total (s)', 'Memory (MB)', 'Recall (%)', 'Status',
 ]
 
+# The memory table reports the headline figure PLUS every raw component it was derived
+# from, so the baseline subtraction can be audited instead of taken on trust.
+MEMORY_TABLE_COLUMNS = [
+  'Method', 'Memory (MB)', 'Peak RSS self (MB)', 'Peak RSS child (MB)',
+  'Python baseline (MB)', 'Import cost (MB)', 'External binary', 'Status',
+]
+
 
 class StepNotApplicable(Exception):
   """Raised by a wrapper for a step it legitimately does not perform (e.g. tools
@@ -98,23 +105,25 @@ def with_threads(method_params, threads):
   return dict(method_params, threads=threads)
 
 
-def failed_row(name, status, detail):
+def failed_row(name, status, detail, columns=None):
   """A table row recording that a method did not produce results, and why."""
-  row = {c: 'N/A' for c in RESULT_TABLE_COLUMNS}
+  columns = columns or RESULT_TABLE_COLUMNS
+  row = {c: 'N/A' for c in columns}
   row['Method'] = name
   row['Status'] = f'{status}: {detail}'
   return row
 
 
-def append_row(rows, output_path, row):
+def append_row(rows, output_path, row, columns=None):
   """Append one method's row to the in-memory table AND flush it to disk immediately.
 
   Writing only at the end meant a wall-clock kill produced no output at all; now a
   truncated run still yields a partial table of everything that finished.
   """
+  columns = columns or RESULT_TABLE_COLUMNS
   rows.append(row)
   write_header = not Path(output_path).exists()
-  pd.DataFrame([row], columns=RESULT_TABLE_COLUMNS).to_csv(
+  pd.DataFrame([row], columns=columns).to_csv(
     output_path, sep='\t', index=False, mode='a', header=write_header
   )
 
@@ -155,63 +164,143 @@ def recall(results_df, expected_df):
   return min((len(matched) / len(expected)) * 100, 100)
 
 
-def measure_peak_rss_mb(benchmark, name, threads):
-  """Peak resident memory (MB) for one method, measured in a FRESH subprocess.
+KB_PER_MB = 1024.0   # ru_maxrss is in kilobytes on Linux
 
-  A fresh process gives a clean per-method high-water mark. We take the max of the
-  process's own peak RSS (in-process tools -- PEPMatch's Rust engine, brute force)
-  and its largest child's peak RSS (subprocess tools -- BLAST/DIAMOND/MMseqs2).
-  This is the fair cross-tool measure the old tracemalloc path could not give: it
-  only saw Python heap allocations, so it undercounted the Rust engine and missed
-  the aligner subprocesses entirely. Runs in a subprocess so a crashing tool cannot
-  take down the driver.
+
+def external_tool_runs():
+  """How many external binaries the current process exec'd (see methods/_shell.py)."""
+  try:
+    import _shell
+    return _shell.EXTERNAL_RUNS
+  except Exception:  # noqa: BLE001 -- absence just means "no external tools ran"
+    return 0
+
+
+def measure_memory(benchmark, method_index, threads):
+  """Peak memory for ONE method, measured in a fresh subprocess. Returns a dict.
+
+  Takes the method's INDEX rather than its name: a method may be registered more than
+  once with different parameters (BLAST runs in both blastp-short and default modes),
+  and selecting by name would silently measure whichever entry came first.
+
+  Raises RuntimeError if the measurement did not produce a result, so a failure lands
+  in the table as FAILED instead of a bare 'N/A' that reads like "not applicable".
   """
   proc = subprocess.run(
     [sys.executable, __file__, '-b', benchmark,
-     '--mem-method', name, '--threads', str(threads)],
+     '--mem-index', str(method_index), '--threads', str(threads)],
     capture_output=True, text=True, env=os.environ,
   )
+
+  payload = None
   for line in proc.stdout.splitlines():
-    if line.startswith('PEAK_RSS_KB='):
-      return int(line.split('=', 1)[1]) / 1024.0  # ru_maxrss is KB on Linux
-  return None
+    if line.startswith('MEM_JSON='):
+      payload = json.loads(line.split('=', 1)[1])
+
+  if payload is None:
+    tail = (proc.stderr or '').strip().splitlines()[-5:]
+    raise RuntimeError(
+      f'memory subprocess exited {proc.returncode} without reporting a result. '
+      f'stderr tail: {" | ".join(tail) if tail else "(empty)"}'
+    )
+  if payload.get('error'):
+    raise RuntimeError(payload['error'])
+  return payload
 
 
-def run_single_method_memory(benchmark, name, threads):
-  """Internal entry point (--mem-method): run exactly one method end to end, then
-  print its peak RSS as `PEAK_RSS_KB=<n>` for measure_peak_rss_mb to parse."""
-  config = load_config()
-  dataset = config['datasets'][benchmark]
-  method = next(m for m in config['methods'] if m['name'] == name)
+def run_single_method_memory(benchmark, method_index, threads):
+  """Internal entry point (--mem-index): run one method end to end in a clean process
+  and report its memory as a single `MEM_JSON={...}` line.
 
-  pin_threads(threads)
-  tool = load_method(name, benchmark, dataset, with_threads(method['method_parameters'], threads))
-  if tool is None:
-    print('PEAK_RSS_KB=0')
-    return
+  WHY THIS IS NOT JUST max(self, children):
 
-  for step in (tool.preprocess_proteome, tool.preprocess_query, tool.search):
-    try:
-      step()
-    except TypeError:
-      pass  # tool legitimately skips this step (e.g. no query preprocessing)
-  if hasattr(tool, 'cleanup'):
-    tool.cleanup()
+  These tools split into two architectures that a raw peak-RSS number cannot compare.
+  PEPMatch and brute force run INSIDE this Python process, so their peak includes the
+  interpreter, pandas and polars -- a fixed floor of several hundred MB that has nothing
+  to do with the algorithm. BLAST/DIAMOND/MMseqs2 exec standalone C binaries whose peak
+  carries no Python at all. Reporting both raw made the two in-process methods land on
+  an identical number (both dominated by the shared floor) while the aligners looked
+  artificially lean -- a measurement artifact, not a result.
 
-  peak = max(
-    resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-    resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
-  )
-  print(f'PEAK_RSS_KB={peak}')
+  So the reported figure is peak memory ABOVE the interpreter floor:
+
+    * exec'd external binaries  -> max(child peak, self peak - baseline)
+      The child is already baseline-free; the parent term covers wrapper work (the
+      aligner wrappers build a full proteome dict in-process to resolve match strings).
+      Both terms are floor-free, so taking the max is consistent.
+
+    * in-process / fork-parallel -> max(self peak, child peak) - baseline
+      A forked worker INHERITS this process's pages, so its RSS contains the same
+      baseline; subtracting once is correct for either term.
+
+  Caveat recorded honestly: for fork-parallel methods (brute force) a worker's private
+  growth is not added to the parent's, so its figure is the dominant shared footprint
+  rather than the sum across workers. The raw components are all reported alongside so
+  the reduction can be audited rather than trusted.
+  """
+  try:
+    config = load_config()
+    dataset = config['datasets'][benchmark]
+    method = config['methods'][method_index]
+    pin_threads(threads)
+
+    # The floor: everything already resident before the tool's module is imported.
+    baseline_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    tool = load_method(
+      method['name'], benchmark, dataset,
+      with_threads(method['method_parameters'], threads),
+    )
+    if tool is None:
+      print('MEM_JSON=' + json.dumps({'skipped': True}))
+      return
+
+    after_import_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    label = str(tool)
+
+    # Same step semantics as the timed run: preprocessing may be inapplicable, but a
+    # crash in search is a real failure and must propagate.
+    for step in (tool.preprocess_proteome, tool.preprocess_query):
+      try:
+        step()
+      except (StepNotApplicable, TypeError):
+        pass
+    tool.search()
+    if hasattr(tool, 'cleanup'):
+      tool.cleanup()
+
+    self_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    child_kb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    external = external_tool_runs() > 0
+
+    if external:
+      reported_kb = max(child_kb, self_kb - baseline_kb)
+    else:
+      reported_kb = max(self_kb, child_kb) - baseline_kb
+
+    print('MEM_JSON=' + json.dumps({
+      'label': label,
+      'memory_mb': round(max(reported_kb, 0) / KB_PER_MB, 1),
+      'self_peak_mb': round(self_kb / KB_PER_MB, 1),
+      'child_peak_mb': round(child_kb / KB_PER_MB, 1),
+      'baseline_mb': round(baseline_kb / KB_PER_MB, 1),
+      'import_cost_mb': round((after_import_kb - baseline_kb) / KB_PER_MB, 1),
+      'external_tool': bool(external),
+    }))
+  except Exception as e:  # noqa: BLE001 -- report the failure through the protocol
+    traceback.print_exc()
+    print('MEM_JSON=' + json.dumps({'error': f'{type(e).__name__}: {e}'}))
 
 
 def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, threads=1):
   config = load_config()
   dataset = config['datasets'][benchmark]
-  methods = config['methods']
+  # Carry each method's index in the config, because the memory subprocess selects by
+  # index -- a method can appear twice under one name (BLAST short vs default).
+  methods = list(enumerate(config['methods']))
 
   if not include_text_shifting:
-    methods = [m for m in methods if not m['text_shifting']]
+    methods = [(i, m) for i, m in methods if not m['text_shifting']]
 
   pin_threads(threads)
 
@@ -225,7 +314,7 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
   # to lose everything, including methods that had already finished hours earlier.
   Path(output_path).unlink(missing_ok=True)
 
-  for method in methods:
+  for method_index, method in methods:
     name = method['name']
     # A method may appear more than once with different parameters (e.g. BLAST is run
     # in both blastp-short and default blastp modes), so `label` is what identifies the
@@ -270,15 +359,13 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
       # total
       total = sum(t for t in [preprocess_proteome_time, preprocess_query_time, search_time] if t is not None)
 
-      # memory (fresh subprocess; off by default -- see measure_peak_rss_mb)
+      # memory (fresh subprocess; off by default -- see run_single_method_memory)
       memory = None
       if include_memory:
         print('  Measuring memory...')
-        memory = measure_peak_rss_mb(benchmark, name, threads)
-        if memory is not None:
-          print(f'  -> {memory:.1f} MB')
-        else:
-          print('  -> N/A')
+        payload = measure_memory(benchmark, method_index, threads)
+        memory = None if payload.get('skipped') else payload['memory_mb']
+        print(f'  -> {memory:.1f} MB' if memory is not None else '  -> N/A')
 
       # recall
       recall_pct = recall(results_df, expected_df)
@@ -330,6 +417,87 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
   return results
 
 
+def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
+  """Produce the MEMORY table only, without redoing the timing run.
+
+  Each method is measured in its own fresh subprocess, so peaks cannot bleed between
+  methods. Alongside the reported figure this writes every raw component (self peak,
+  child peak, interpreter baseline, import cost, whether external binaries ran) so the
+  number in the paper can be audited rather than taken on faith.
+  """
+  config = load_config()
+  methods = list(enumerate(config['methods']))
+  if not include_text_shifting:
+    methods = [(i, m) for i, m in methods if not m['text_shifting']]
+
+  pin_threads(threads)
+
+  rows = []
+  output_path = str(Path(__file__).parent / f'{benchmark}_memory.tsv')
+  Path(output_path).unlink(missing_ok=True)
+
+  for method_index, method in methods:
+    label = method.get('label', method['name'])
+    print(f'\n{"=" * 60}')
+    print(f'  {label}  (memory)')
+    print(f'{"=" * 60}')
+    sys.stdout.flush()
+
+    try:
+      payload = measure_memory(benchmark, method_index, threads)
+      if payload.get('skipped'):
+        append_row(rows, output_path,
+                   failed_row(label, 'SKIPPED', 'not applicable to this dataset',
+                              MEMORY_TABLE_COLUMNS),
+                   MEMORY_TABLE_COLUMNS)
+        print('  -> SKIPPED')
+        continue
+
+      print(f'  -> {payload["memory_mb"]:.1f} MB '
+            f'(self {payload["self_peak_mb"]:.1f} / child {payload["child_peak_mb"]:.1f} / '
+            f'baseline {payload["baseline_mb"]:.1f}, '
+            f'external={payload["external_tool"]})')
+
+      append_row(rows, output_path, {
+        'Method': payload['label'],
+        'Memory (MB)': f'{payload["memory_mb"]:.1f}',
+        'Peak RSS self (MB)': f'{payload["self_peak_mb"]:.1f}',
+        'Peak RSS child (MB)': f'{payload["child_peak_mb"]:.1f}',
+        'Python baseline (MB)': f'{payload["baseline_mb"]:.1f}',
+        'Import cost (MB)': f'{payload["import_cost_mb"]:.1f}',
+        'External binary': 'yes' if payload['external_tool'] else 'no',
+        'Status': 'OK',
+      }, MEMORY_TABLE_COLUMNS)
+    except Exception as e:  # noqa: BLE001 -- one method must not end the run
+      detail = f'{type(e).__name__}: {e}'
+      print(f'  !! {label} FAILED: {detail}')
+      append_row(rows, output_path,
+                 failed_row(label, 'FAILED', detail, MEMORY_TABLE_COLUMNS),
+                 MEMORY_TABLE_COLUMNS)
+      continue
+
+  results = pd.DataFrame(rows, columns=MEMORY_TABLE_COLUMNS)
+
+  print(f'\n\n{"=" * 80}')
+  print(f'  {benchmark.upper()} MEMORY')
+  print(f'{"=" * 80}\n')
+  print(results.to_string(index=False))
+
+  results.to_csv(output_path, sep='\t', index=False)
+  print(f'\nSaved to {output_path}')
+
+  failures = [r['Method'] for r in rows if r.get('Status', 'OK') != 'OK']
+  if failures:
+    print(f'!! {len(failures)} method(s) did not report memory: {", ".join(failures)}')
+  else:
+    print(f'All {len(rows)} methods reported memory successfully.')
+  print('\nReported memory = peak RSS attributable to the method, EXCLUDING the shared '
+        'Python interpreter baseline.\nRaw components are in the table so the reduction '
+        'can be checked.')
+
+  return results
+
+
 def main():
   parser = argparse.ArgumentParser(description='PEPMatch Benchmarking Framework')
   parser.add_argument(
@@ -337,19 +505,32 @@ def main():
     choices=['mhc_ligands', 'milk', 'coronavirus', 'neoepitopes', 'cosmic_indel', 'cedar_indel'],
     required=True,
   )
-  parser.add_argument('-m', '--memory', action='store_true', default=False)
+  parser.add_argument(
+    '-m', '--memory', action='store_true', default=False,
+    help='Also measure memory during the timed run. Re-runs every method, so it '
+         'roughly doubles wall time; prefer --memory-only as a separate job.',
+  )
+  parser.add_argument(
+    '--memory-only', action='store_true', default=False,
+    help='Produce ONLY the memory table (no timing, no recall).',
+  )
   parser.add_argument('-t', '--text_shifting', action='store_true', default=False)
   parser.add_argument(
     '-p', '--threads', type=int, default=1,
     help='Threads every tool is pinned to, for a fair timing comparison (default 1). '
          'On the cluster, set this to match --cpus-per-task.',
   )
-  # Internal: measure one method's peak RSS in a fresh process (see measure_peak_rss_mb).
-  parser.add_argument('--mem-method', default=None, help=argparse.SUPPRESS)
+  # Internal: measure one method's memory in a fresh process. Selected by INDEX, not
+  # name, because a method can be registered twice (BLAST short vs default).
+  parser.add_argument('--mem-index', type=int, default=None, help=argparse.SUPPRESS)
   args = parser.parse_args()
 
-  if args.mem_method:
-    run_single_method_memory(args.benchmark, args.mem_method, args.threads)
+  if args.mem_index is not None:
+    run_single_method_memory(args.benchmark, args.mem_index, args.threads)
+    return
+
+  if args.memory_only:
+    run_memory_benchmark(args.benchmark, args.text_shifting, args.threads)
     return
 
   run_benchmark(args.benchmark, args.memory, args.text_shifting, args.threads)
