@@ -15,11 +15,9 @@ from pathlib import Path
 
 LOG_DIR = Path(os.environ.get('PEPMATCH_BENCH_LOGDIR', '.'))
 
-# How many external binaries this process has exec'd. The memory measurement needs to
-# know: a tool that exec's a standalone binary (BLAST/DIAMOND/MMseqs2) has its real
-# footprint in a child that carries NO Python interpreter, whereas an in-process or
-# fork-parallel method (PEPMatch, brute force) shares this process's interpreter
-# baseline. Those two cases must be reduced to a comparable number differently.
+# External binaries this process has exec'd. The memory measurement uses this to tell an
+# aligner (real footprint in a Python-free child) from an in-process method (shares this
+# process's interpreter baseline) -- the two are reduced to a comparable number differently.
 EXTERNAL_RUNS = 0
 
 

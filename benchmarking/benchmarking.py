@@ -218,50 +218,24 @@ def measure_memory(benchmark, method_index, threads, phase='all'):
 
 
 def run_single_method_memory(benchmark, method_index, threads, phase='all'):
-  """Internal entry point (--mem-index): run one method in a clean process and report
-  its memory as a single `MEM_JSON={...}` line.
+  """Internal entry point (--mem-index): run one method in a clean process and print its
+  memory as a single `MEM_JSON={...}` line.
 
-  PHASES. Preprocessing is a one-time cost that is amortised away in real use, while
-  search is paid per query, so collapsing them into one peak answers a question nobody
-  asks -- and it understates any tool whose cost is front-loaded into an index build.
-  The phases are measured in SEPARATE processes because peak RSS is a high-water mark
-  that cannot be reset within a process:
-    'preprocess' -- build the index/database only, and deliberately do NOT clean up, so
-                    the artifact survives for the search phase to use.
+  Phases (each in a separate process, since peak RSS cannot be reset within one):
+    'preprocess' -- build the index/database only; skips cleanup so the artifact survives.
     'search'     -- search against the artifact the preprocess phase left behind.
-    'all'        -- the authoritative end-to-end peak. Kept because the true
-                    single-process peak can exceed max(preprocess, search) when
-                    preprocessing memory is not released before searching, so max()
-                    alone would only be a lower bound.
-  Methods declaring `search_requires_preprocess` (brute force: its proteome lives in
-  this process's memory with no on-disk handoff) report 'inseparable' for the split
-  phases rather than a fabricated number.
+    'all'        -- authoritative end-to-end peak (measured, not derived: the true peak can
+                    exceed max(preprocess, search) if preprocess memory isn't freed first).
+  Methods declaring `search_requires_preprocess` (brute force -- proteome lives in-process
+  with no on-disk handoff) report 'inseparable' for the split phases.
 
-  WHY THIS IS NOT JUST max(self, children):
-
-  These tools split into two architectures that a raw peak-RSS number cannot compare.
-  PEPMatch and brute force run INSIDE this Python process, so their peak includes the
-  interpreter, pandas and polars -- a fixed floor of several hundred MB that has nothing
-  to do with the algorithm. BLAST/DIAMOND/MMseqs2 exec standalone C binaries whose peak
-  carries no Python at all. Reporting both raw made the two in-process methods land on
-  an identical number (both dominated by the shared floor) while the aligners looked
-  artificially lean -- a measurement artifact, not a result.
-
-  So the reported figure is peak memory ABOVE the interpreter floor:
-
-    * exec'd external binaries  -> max(child peak, self peak - baseline)
-      The child is already baseline-free; the parent term covers wrapper work (the
-      aligner wrappers build a full proteome dict in-process to resolve match strings).
-      Both terms are floor-free, so taking the max is consistent.
-
-    * in-process / fork-parallel -> max(self peak, child peak) - baseline
-      A forked worker INHERITS this process's pages, so its RSS contains the same
-      baseline; subtracting once is correct for either term.
-
-  Caveat recorded honestly: for fork-parallel methods (brute force) a worker's private
-  growth is not added to the parent's, so its figure is the dominant shared footprint
-  rather than the sum across workers. The raw components are all reported alongside so
-  the reduction can be audited rather than trusted.
+  The reported figure is peak RSS ABOVE the Python interpreter floor, so in-process tools
+  (PEPMatch, brute force -- peak includes interpreter + pandas + polars) stay comparable to
+  the aligners (standalone C binaries, no Python). Without it they weren't: PEPMatch and
+  brute force previously reported an identical number, both dominated by the shared floor.
+    * external binary  -> max(child peak, self peak - baseline)   both terms floor-free
+    * in-process       -> max(self peak, child peak) - baseline   a fork inherits the floor
+  Every raw component is reported alongside so the reduction can be audited, not trusted.
   """
   try:
     config = load_config()

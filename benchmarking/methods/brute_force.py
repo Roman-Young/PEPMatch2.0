@@ -102,7 +102,10 @@ class Benchmarker:
   # the harness reports "inseparable" instead of silently producing a wrong split.
   search_requires_preprocess = True
 
-  def __init__(self, benchmark, query, proteome, lengths, max_mismatches, method_parameters, indels=0):
+  def __init__(
+    self, benchmark: str, query: str, proteome: str, lengths: list, max_mismatches: int,
+    method_parameters: dict, indels: int = 0
+  ):
     if indels <= 0:
       raise ValueError('Brute Force is an indel-only baseline.')
     self.query = str(query)

@@ -13,7 +13,10 @@ def _query_lengths(query_path):
 
 
 class Benchmarker:
-  def __init__(self, benchmark, query, proteome, lengths, max_mismatches, method_parameters, indels=0):
+  def __init__(
+    self, benchmark: str, query: str, proteome: str, lengths: list, max_mismatches: int,
+    method_parameters: dict, indels: int = 0
+  ):
     self.query = str(query)
     self.proteome = str(proteome)
     self.lengths = lengths
