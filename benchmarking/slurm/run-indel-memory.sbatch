@@ -11,7 +11,7 @@
 # MEMORY table for the 1-indel benchmark. Run this AFTER the timing job
 # (run-indel-benchmark.sbatch) -- it is a separate job on purpose.
 #
-#   sbatch benchmarking/run-indel-memory.sbatch
+#   sbatch benchmarking/slurm/run-indel-memory.sbatch
 #
 # WHY SEPARATE: measuring memory means running every method a second time (peak RSS can
 # only be observed by actually executing the work). Folding that into the timing job
@@ -39,7 +39,8 @@ set -euo pipefail
 
 REPO="$HOME/projects/pepmatch/PEPMatch2.0"
 SCRATCH="/mnt/hpcscratch/ryoung/pepmatch-mem-${SLURM_JOB_ID:-manual}"
-RESULTS="$REPO/benchmarking"
+# Generated tables land in benchmarking/results/ (see benchmarking.py:results_dir).
+RESULTS="$REPO/benchmarking/results"
 
 echo "=== PEPMatch indel benchmark -- MEMORY ==="
 echo "job        : ${SLURM_JOB_ID:-manual}"

@@ -9,7 +9,7 @@ The numbers are read from the TSVs, never hand-typed, so the document cannot dri
 the actual results. Run it wherever the TSVs live -- i.e. on the cluster once the timing
 and memory jobs have finished:
 
-    python3 benchmarking/build-results-doc.py
+    python3 benchmarking/scripts/build-results-doc.py
 
 Missing TSVs are skipped with a warning (e.g. running before the memory job completes),
 so the document always reflects whatever results exist so far.
@@ -19,9 +19,11 @@ from pathlib import Path
 
 import pandas as pd
 
-BENCH = Path(__file__).resolve().parent
-XLSX_OUT = BENCH / 'indel-benchmarking-results.xlsx'
-MD_OUT = BENCH / 'RESULTS.md'
+# This script lives in benchmarking/scripts/; the result TSVs it reads and the outputs
+# it writes both live in benchmarking/results/.
+RESULTS = Path(__file__).resolve().parent.parent / 'results'
+XLSX_OUT = RESULTS / 'indel-benchmarking-results.xlsx'
+MD_OUT = RESULTS / 'RESULTS.md'
 
 # Each table: (tsv, sheet title, source->display columns, per-column decimal places).
 TIMING_COLS = {
@@ -87,7 +89,7 @@ def fmt(value, decimals):
 
 
 def load_table(tsv, colmap, decimals):
-  path = BENCH / tsv
+  path = RESULTS / tsv
   if not path.exists():
     print(f'  skip: {tsv} not found (has that job finished?)')
     return None

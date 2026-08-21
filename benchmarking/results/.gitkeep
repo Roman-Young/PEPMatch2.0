@@ -1,0 +1,2 @@
+# Generated benchmark results land here (gitignored). This file keeps the empty
+# directory in the repo so benchmarking.py has somewhere to write on a fresh clone.

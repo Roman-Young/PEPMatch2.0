@@ -1,11 +1,11 @@
 #!/bin/bash
 # Pre-submission smoke test. Run this ONCE before sbatch'ing the real benchmark.
 #
-#   bash benchmarking/smoke-test.sh
+#   bash benchmarking/scripts/smoke-test.sh
 #
 # On the LJI cluster, run it inside an interactive allocation so it doesn't hog a
 # login node:
-#   srun --cpus-per-task=8 --mem=32G --time=1:00:00 --pty bash benchmarking/smoke-test.sh
+#   srun --cpus-per-task=8 --mem=32G --time=1:00:00 --pty bash benchmarking/scripts/smoke-test.sh
 #
 # It checks, in order:
 #   1. every binary and python dep is present, and the Rust engine imports
@@ -16,8 +16,10 @@
 
 set -uo pipefail
 
+# This script lives in benchmarking/scripts/. HERE=scripts, BENCH=benchmarking, REPO=root.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(dirname "$HERE")"
+BENCH="$(dirname "$HERE")"
+REPO="$(dirname "$BENCH")"
 THREADS="${SLURM_CPUS_PER_TASK:-4}"
 FAILED=0
 
@@ -48,16 +50,16 @@ fi
 
 step "2. harness files parse"
 if python3 -m py_compile \
-    "$HERE/benchmarking.py" "$HERE/verify_coordinates.py" \
-    "$HERE/methods/_shell.py" "$HERE/methods/blast.py" "$HERE/methods/diamond.py" \
-    "$HERE/methods/mmseqs2.py" "$HERE/methods/brute_force.py" \
+    "$BENCH/benchmarking.py" "$HERE/verify_coordinates.py" \
+    "$BENCH/methods/_shell.py" "$BENCH/methods/blast.py" "$BENCH/methods/diamond.py" \
+    "$BENCH/methods/mmseqs2.py" "$BENCH/methods/brute_force.py" \
     "$REPO/pepmatch/benchmarker.py" 2>&1; then
   ok "all harness files compile"
 else
   bad "syntax error in the harness"
 fi
 
-if python3 -c "import json; json.load(open('$HERE/benchmarking_parameters.json'))" 2>/dev/null; then
+if python3 -c "import json; json.load(open('$BENCH/benchmarking_parameters.json'))" 2>/dev/null; then
   ok "benchmarking_parameters.json is valid"
 else
   bad "benchmarking_parameters.json is malformed"
@@ -74,21 +76,20 @@ step "4. full CEDAR run (50 queries, every method)"
 if [[ $FAILED -eq 1 ]]; then
   echo "  SKIPPED -- fix the failures above first."
 else
-  cd "$HERE"
+  cd "$BENCH"
+  RESULT="results/cedar_indel_benchmarking.tsv"
   if python3 benchmarking.py -b cedar_indel -p "$THREADS"; then
     echo
-    if grep -q "FAILED\|SKIPPED" cedar_indel_benchmarking.tsv 2>/dev/null; then
-      bad "a method reported FAILED/SKIPPED -- see the table + logs/ directory"
+    if grep -q "FAILED\|SKIPPED" "$RESULT" 2>/dev/null; then
+      bad "a method reported FAILED/SKIPPED -- see the table + results/logs/ directory"
     else
       ok "every method produced results"
     fi
     echo
     echo "  --- table ---"
-    column -t -s $'\t' cedar_indel_benchmarking.tsv 2>/dev/null || cat cedar_indel_benchmarking.tsv
+    column -t -s $'\t' "$RESULT" 2>/dev/null || cat "$RESULT"
     echo
     echo "  Sanity check: PEPMatch and Brute Force should both be 100% recall."
-    echo "  Note whether MMseqs2 moved off its previous 55.6% -- masking is now OFF,"
-    echo "  and if it moved materially the old numbers understated it."
   else
     bad "CEDAR run crashed"
   fi
@@ -97,7 +98,7 @@ fi
 echo
 if [[ $FAILED -eq 0 ]]; then
   echo "ALL CHECKS PASSED -- safe to submit:"
-  echo "  sbatch benchmarking/run-indel-benchmark.sbatch"
+  echo "  sbatch benchmarking/slurm/run-indel-benchmark.sbatch"
   exit 0
 fi
 echo "SOME CHECKS FAILED -- do not submit the overnight job yet."

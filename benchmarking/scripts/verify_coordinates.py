@@ -21,8 +21,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-PROTEOME = HERE / 'proteomes' / 'human.fasta'
+# This script lives in benchmarking/scripts/; the data lives one level up.
+BENCH = Path(__file__).resolve().parent.parent
+PROTEOME = BENCH / 'proteomes' / 'human.fasta'
 
 
 def first_protein():

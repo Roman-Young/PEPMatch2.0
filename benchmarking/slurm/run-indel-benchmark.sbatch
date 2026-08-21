@@ -12,7 +12,7 @@
 # Produces the two TIMING tables (COSMIC + CEDAR). Memory is deliberately NOT measured
 # here -- see the -m note at the bottom.
 #
-#   sbatch benchmarking/run-indel-benchmark.sbatch
+#   sbatch benchmarking/slurm/run-indel-benchmark.sbatch
 #
 # WHY THE DATASETS RUN SEQUENTIALLY, NOT AS TWO JOBS:
 # cosmic_indel and cedar_indel use the SAME proteome (human.fasta), and BLAST/DIAMOND/
@@ -29,7 +29,8 @@ set -euo pipefail
 
 REPO="$HOME/projects/pepmatch/PEPMatch2.0"
 SCRATCH="/mnt/hpcscratch/ryoung/pepmatch-indel-${SLURM_JOB_ID:-manual}"
-RESULTS="$REPO/benchmarking"
+# Generated tables land in benchmarking/results/ (see benchmarking.py:results_dir).
+RESULTS="$REPO/benchmarking/results"
 
 echo "=== PEPMatch indel benchmark ==="
 echo "job        : ${SLURM_JOB_ID:-manual}"
@@ -86,7 +87,7 @@ cd "$SCRATCH/work"
 # this gate checks them against a peptide at a known position before we burn hours.
 echo
 echo "=== pre-flight: coordinate convention ==="
-if ! python3 "$REPO/benchmarking/verify_coordinates.py"; then
+if ! python3 "$REPO/benchmarking/scripts/verify_coordinates.py"; then
   echo "FATAL: coordinate check failed -- recall numbers would be meaningless." >&2
   exit 1
 fi

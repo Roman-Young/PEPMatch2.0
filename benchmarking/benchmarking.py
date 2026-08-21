@@ -56,6 +56,14 @@ def load_config():
     return json.load(f)
 
 
+def results_dir():
+  """Directory for generated result tables. Kept separate from the framework/source
+  files so runs don't clutter the top level; created on demand."""
+  d = Path(__file__).parent / 'results'
+  d.mkdir(exist_ok=True)
+  return d
+
+
 def resolve_proteome(dataset):
   """Where to read the proteome from.
 
@@ -318,7 +326,7 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
   )
 
   rows = []
-  output_path = str(Path(__file__).parent / f'{benchmark}_benchmarking.tsv')
+  output_path = str(results_dir() / f'{benchmark}_benchmarking.tsv')
   # Start clean, then append after every method. A SLURM wall-clock kill mid-run used
   # to lose everything, including methods that had already finished hours earlier.
   Path(output_path).unlink(missing_ok=True)
@@ -452,8 +460,8 @@ def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
 
   rows = []
   detail_rows = []
-  output_path = str(Path(__file__).parent / f'{benchmark}_memory.tsv')
-  detail_path = str(Path(__file__).parent / f'{benchmark}_memory_detail.tsv')
+  output_path = str(results_dir() / f'{benchmark}_memory.tsv')
+  detail_path = str(results_dir() / f'{benchmark}_memory_detail.tsv')
   Path(output_path).unlink(missing_ok=True)
   Path(detail_path).unlink(missing_ok=True)
 
