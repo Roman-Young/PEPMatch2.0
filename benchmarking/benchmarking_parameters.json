@@ -66,7 +66,7 @@
                         "method_parameters":{
                                 "bin_directory": "",
                                 "task": "blastp-short",
-                                "max_target_seqs": 100000
+                                "max_target_seqs": 100
                         }
                 },
                 {
@@ -76,7 +76,7 @@
                         "method_parameters":{
                                 "bin_directory": "",
                                 "task": "blastp",
-                                "max_target_seqs": 100000
+                                "max_target_seqs": 100
                         }
                 },
                 {
@@ -91,7 +91,7 @@
                         "text_shifting": 0,
                         "method_parameters":{
                                 "bin_directory": "",
-                                "max_target_seqs": 100000
+                                "max_target_seqs": 100
                         }
                 },
                 {
