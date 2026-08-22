@@ -32,6 +32,10 @@ class BLAST(object):
     # directly how much of BLAST's performance on short peptides comes from picking the
     # right task, instead of hiding that choice in a methods footnote.
     self.task = method_parameters.get('task', 'blastp-short')
+    # Cap on reported target sequences per query. High values find more (a true indel
+    # match on a short query can rank low by score), but cost runtime; swept to find the
+    # recall/runtime knee. Overridable per-run via benchmarking.py --max-target-seqs.
+    self.max_target_seqs = int(method_parameters.get('max_target_seqs', 100000))
 
     bin_directory = method_parameters['bin_directory']
     self.makeblastdb_path = os.path.join(bin_directory, 'makeblastdb')
@@ -65,7 +69,7 @@ class BLAST(object):
     out_csv = f'output-{self.task}.csv'   # distinct per task so the two rows can't collide
     run_tool(
       f"{self.blastp_path} -query {self.query} -db {self.proteome} "
-      f"-task {self.task} -evalue {evalue} -max_target_seqs 100000 "
+      f"-task {self.task} -evalue {evalue} -max_target_seqs {self.max_target_seqs} "
       f"-comp_based_stats 0 -num_threads {self.threads} -outfmt 10 -out {out_csv}",
       f'blast-{self.task}',
     )

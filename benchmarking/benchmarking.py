@@ -56,11 +56,20 @@ def load_config():
     return json.load(f)
 
 
+# Per-run overrides, set from the CLI in main(). Module globals so the whole run and its
+# memory-measurement subprocesses see the same values.
+MAX_TARGET_SEQS = None   # None => use each method's own default (blast/mmseqs)
+RESULTS_SUBDIR = None     # None => write straight into results/; else results/<subdir>/
+
+
 def results_dir():
   """Directory for generated result tables. Kept separate from the framework/source
-  files so runs don't clutter the top level; created on demand."""
+  files so runs don't clutter the top level. --results-subdir isolates a run's output
+  (e.g. one subdir per max_target_seqs sweep point so concurrent jobs don't collide)."""
   d = Path(__file__).parent / 'results'
-  d.mkdir(exist_ok=True)
+  if RESULTS_SUBDIR:
+    d = d / RESULTS_SUBDIR
+  d.mkdir(parents=True, exist_ok=True)
   return d
 
 
@@ -116,9 +125,14 @@ def pin_threads(threads):
 
 
 def with_threads(method_params, threads):
-  """Inject the pinned thread count into a method's parameters without mutating
-  the shared config dict."""
-  return dict(method_params, threads=threads)
+  """Inject per-run overrides (thread count, and --max-target-seqs when set) into a
+  method's parameters without mutating the shared config dict. BLAST and MMseqs2 both
+  read 'max_target_seqs', so a single override sweeps the two together; other methods
+  ignore the key."""
+  params = dict(method_params, threads=threads)
+  if MAX_TARGET_SEQS is not None:
+    params['max_target_seqs'] = MAX_TARGET_SEQS
+  return params
 
 
 def failed_row(name, status, detail, columns=None):
@@ -202,10 +216,14 @@ def measure_memory(benchmark, method_index, threads, phase='all'):
   Raises RuntimeError if the measurement did not produce a result, so a failure lands
   in the table as FAILED instead of a bare 'N/A' that reads like "not applicable".
   """
+  argv = [sys.executable, __file__, '-b', benchmark,
+          '--mem-index', str(method_index), '--mem-phase', phase,
+          '--threads', str(threads)]
+  # Propagate the sweep override so the measured process uses the same cap as timing.
+  if MAX_TARGET_SEQS is not None:
+    argv += ['--max-target-seqs', str(MAX_TARGET_SEQS)]
   proc = subprocess.run(
-    [sys.executable, __file__, '-b', benchmark,
-     '--mem-index', str(method_index), '--mem-phase', phase,
-     '--threads', str(threads)],
+    argv,
     capture_output=True, text=True, env=os.environ,
   )
 
@@ -577,12 +595,27 @@ def main():
     help='Threads every tool is pinned to, for a fair timing comparison (default 1). '
          'On the cluster, set this to match --cpus-per-task.',
   )
+  parser.add_argument(
+    '--max-target-seqs', type=int, default=None,
+    help='Override the per-query result cap for BLAST (-max_target_seqs) and MMseqs2 '
+         '(--max-seqs). Used to sweep the recall/runtime tradeoff; unset keeps each '
+         "tool's own default.",
+  )
+  parser.add_argument(
+    '--results-subdir', default=None,
+    help='Write result tables to results/<subdir>/ instead of results/. Lets sweep '
+         'jobs (e.g. one per max_target_seqs) run concurrently without overwriting.',
+  )
   # Internal: measure one method's memory in a fresh process. Selected by INDEX, not
   # name, because a method can be registered twice (BLAST short vs default).
   parser.add_argument('--mem-index', type=int, default=None, help=argparse.SUPPRESS)
   parser.add_argument('--mem-phase', choices=['all', 'preprocess', 'search'],
                       default='all', help=argparse.SUPPRESS)
   args = parser.parse_args()
+
+  global MAX_TARGET_SEQS, RESULTS_SUBDIR
+  MAX_TARGET_SEQS = args.max_target_seqs
+  RESULTS_SUBDIR = args.results_subdir
 
   if args.mem_index is not None:
     run_single_method_memory(args.benchmark, args.mem_index, args.threads, args.mem_phase)

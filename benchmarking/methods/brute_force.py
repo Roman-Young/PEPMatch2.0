@@ -117,8 +117,15 @@ class Benchmarker:
     return 'Brute Force'
 
   def preprocess_proteome(self):
-    # Parse the proteome and build the prefilter index here, so its cost is charged to
-    # proteome preprocessing (matching how the framework times every other method).
+    # Brute Force is the naive exhaustive reference: unlike the aligners (which build a
+    # persisted database) it has no reusable index, so it reports N/A for preprocessing.
+    # The in-memory prefilter is built lazily in search() instead -- see _build_index.
+    raise TypeError('Brute Force builds its index at search time (no proteome preprocessing).')
+
+  def _build_index(self):
+    # Parse the proteome and build the pigeonhole prefilter in memory. Charged to search
+    # time, and rebuilt every run (it is not a persisted artifact) -- which is also why
+    # the memory table reports Brute Force's phases as inseparable.
     global _ACCS, _SEQS, _STARTS, _LENS, _CONCAT, _N
     _N = self.indels
     accs, seqs, header, chunks = [], [], None, []
@@ -150,6 +157,7 @@ class Benchmarker:
     raise TypeError('Brute Force does not preprocess queries.')
 
   def search(self):
+    self._build_index()   # build the prefilter here so its cost counts as search time
     queries = []
     with open(self.query) as f:
       for line in f:

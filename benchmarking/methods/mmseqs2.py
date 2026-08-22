@@ -22,6 +22,9 @@ class MMseqs2(object):
 
     self.max_mismatches = max_mismatches
     self.threads = int(method_parameters.get('threads', 1))
+    # Cap on results per query (MMseqs2's --max-seqs). Reads the same 'max_target_seqs'
+    # key as BLAST so one --max-target-seqs sweep drives both tools together.
+    self.max_seqs = int(method_parameters.get('max_target_seqs', 100000))
 
     bin_directory = method_parameters['bin_directory']
     self.bin_file = os.path.join(bin_directory, 'mmseqs')
@@ -48,7 +51,7 @@ class MMseqs2(object):
     # comparison is symmetric.
     run_tool(
       f"{self.bin_file} easy-search {self.query} {self.proteome_name} "
-      f"results.m8 tmp -s 7.5 -e 10000 --max-seqs 100000 --threads {self.threads} "
+      f"results.m8 tmp -s 7.5 -e 10000 --max-seqs {self.max_seqs} --threads {self.threads} "
       f"--mask 0 --comp-bias-corr 0 "
       "--format-output \"qseq,taln,theader,mismatch,tstart\"",
       'mmseqs-easy-search',
