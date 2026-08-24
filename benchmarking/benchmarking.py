@@ -60,6 +60,33 @@ def load_config():
 # memory-measurement subprocesses see the same values.
 MAX_TARGET_SEQS = None   # None => use each method's own default (blast/mmseqs)
 RESULTS_SUBDIR = None     # None => write straight into results/; else results/<subdir>/
+METHOD_FILTER = None      # None => run every registered method; else only these names/labels
+
+
+def filter_methods(methods):
+  """Narrow an ALREADY-ENUMERATED (index, method) list to --methods.
+
+  Takes and returns the enumerated pairs rather than the raw config list, because the
+  memory subprocess selects a method by its index in config['methods']. Re-enumerating a
+  filtered list would renumber every method and silently measure the wrong one.
+
+  Matches on either 'label' or 'name', case-insensitively, so a doubly-registered method
+  can be picked apart ('BLAST (short)') or taken together ('blast').
+  """
+  if not METHOD_FILTER:
+    return methods
+  wanted = {w.strip().lower() for w in METHOD_FILTER if w.strip()}
+  kept = [
+    (i, m) for i, m in methods
+    if m.get('label', m['name']).lower() in wanted or m['name'].lower() in wanted
+  ]
+  if not kept:
+    available = sorted({m.get('label', m['name']) for _, m in methods})
+    raise SystemExit(
+      f'--methods matched nothing. Asked for: {", ".join(sorted(wanted))}. '
+      f'Available: {", ".join(available)}'
+    )
+  return kept
 
 
 def results_dir():
@@ -336,6 +363,8 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
 
   if not include_text_shifting:
     methods = [(i, m) for i, m in methods if not m['text_shifting']]
+  methods = filter_methods(methods)
+  print(f'Methods this run: {", ".join(m.get("label", m["name"]) for _, m in methods)}')
 
   pin_threads(threads)
 
@@ -473,6 +502,8 @@ def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
   methods = list(enumerate(config['methods']))
   if not include_text_shifting:
     methods = [(i, m) for i, m in methods if not m['text_shifting']]
+  methods = filter_methods(methods)
+  print(f'Methods this run: {", ".join(m.get("label", m["name"]) for _, m in methods)}')
 
   pin_threads(threads)
 
@@ -576,8 +607,11 @@ def run_memory_benchmark(benchmark, include_text_shifting=False, threads=1):
 def main():
   parser = argparse.ArgumentParser(description='PEPMatch Benchmarking Framework')
   parser.add_argument(
+    # Derived from the config rather than hardcoded: a dataset used to need registering
+    # in two places, and forgetting the second produced "invalid choice" for a dataset
+    # that was plainly in the JSON.
     '-b', '--benchmark',
-    choices=['mhc_ligands', 'milk', 'coronavirus', 'neoepitopes', 'cosmic_indel', 'cedar_indel'],
+    choices=sorted(load_config()['datasets']),
     required=True,
   )
   parser.add_argument(
@@ -602,6 +636,14 @@ def main():
          "tool's own default.",
   )
   parser.add_argument(
+    '--methods', default=None,
+    help='Comma-separated methods to run (matches label or name, case-insensitive); '
+         'default runs every registered method. The scaling sweep uses '
+         "'PEPMatch,brute_force' -- running the aligners over a 1M-query set would cost "
+         'hundreds of hours and terabytes of RSS for numbers that belong to the separate '
+         'fixed-size aligner table.',
+  )
+  parser.add_argument(
     '--results-subdir', default=None,
     help='Write result tables to results/<subdir>/ instead of results/. Lets sweep '
          'jobs (e.g. one per max_target_seqs) run concurrently without overwriting.',
@@ -613,9 +655,10 @@ def main():
                       default='all', help=argparse.SUPPRESS)
   args = parser.parse_args()
 
-  global MAX_TARGET_SEQS, RESULTS_SUBDIR
+  global MAX_TARGET_SEQS, RESULTS_SUBDIR, METHOD_FILTER
   MAX_TARGET_SEQS = args.max_target_seqs
   RESULTS_SUBDIR = args.results_subdir
+  METHOD_FILTER = args.methods.split(',') if args.methods else None
 
   if args.mem_index is not None:
     run_single_method_memory(args.benchmark, args.mem_index, args.threads, args.mem_phase)

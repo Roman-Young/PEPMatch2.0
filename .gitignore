@@ -33,6 +33,15 @@ benchmarking.xlsx
 benchmarking/results/*
 !benchmarking/results/.gitkeep
 benchmarking/*.log
+# Synthetic indel benchmark: the small subsets ARE committed -- they are what a reviewer
+# can re-run cheaply. The 100k/1M artifacts are hundreds of MB and fully reproducible
+# from the generator plus the seed and proteome sha256 recorded in
+# expected/synth-*-manifest.json. Regenerate with slurm/run-synth-generate.sbatch.
+benchmarking/queries/synth-*-100k.fasta
+benchmarking/queries/synth-*-1m.fasta
+benchmarking/expected/synth-*-100k-expected.tsv
+benchmarking/expected/synth-*-1m-expected.tsv
+benchmarking/expected/synth-*-rejected.tsv
 notes.txt
 pepmatch.py
 test.csv

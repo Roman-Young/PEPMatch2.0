@@ -1,0 +1,116 @@
+{
+  "generated_by": "benchmarking/scripts/build-synthetic-indel-benchmark.py",
+  "generator_git_blob": "680270969f5d4d2556337a2f8df2e43a50ba083b",
+  "oracle_git_blobs": {
+    "indel_brute_force": "2f4c0d986ad8071261b7a6d02265016510616d70",
+    "indel2_brute_force": "2bb27f227d737e4c88f0fc80b3251fb484f03e9c"
+  },
+  "args": {
+    "indels": 1,
+    "n_max": 5000,
+    "sizes": "100,1000,5000",
+    "min_len": null,
+    "max_len": 25,
+    "length_dist": "cedar",
+    "seed": 20260823,
+    "threads": 4,
+    "proteome": "/home/roman/agent/codebases/PEPMatch2.0/benchmarking/proteomes/human.fasta",
+    "out_prefix": null,
+    "name_prefix": null,
+    "audit_sample": 15,
+    "rejected_cap": 10000,
+    "cost_estimate": false,
+    "print_config": false,
+    "dry_run": false
+  },
+  "seed": 20260823,
+  "indels": 1,
+  "length_range": [
+    8,
+    25
+  ],
+  "length_distribution": "cedar",
+  "length_weights": {
+    "8": 3,
+    "9": 7,
+    "10": 7,
+    "11": 1,
+    "12": 3,
+    "13": 1,
+    "14": 2,
+    "15": 2,
+    "16": 1,
+    "17": 2,
+    "18": 1,
+    "20": 1,
+    "22": 2,
+    "23": 2,
+    "25": 31
+  },
+  "proteome": {
+    "path": "human.fasta",
+    "sha256": "449ac5a0a6193de788d6651d9e318025b8fc2d75523a1921cd69b5a22f903109",
+    "proteins": 81837,
+    "residues": 29703862
+  },
+  "reconciliation": {
+    "ACCEPTED": 5000,
+    "window_crosses_protein_edge": 259
+  },
+  "total_draws": 5259,
+  "observed_length_histogram": {
+    "8": 233,
+    "9": 547,
+    "10": 541,
+    "11": 70,
+    "12": 209,
+    "13": 80,
+    "14": 163,
+    "15": 150,
+    "16": 70,
+    "17": 158,
+    "18": 73,
+    "20": 83,
+    "22": 161,
+    "23": 140,
+    "25": 2322
+  },
+  "audit": {
+    "sampled": 15,
+    "ok": true,
+    "note": "exhaustive scan agreed on all 15 queries",
+    "seconds": 569.9
+  },
+  "files": {
+    "100": {
+      "size": 100,
+      "queries_fasta": "queries/synth-1indel-100.fasta",
+      "expected_tsv": "expected/synth-1indel-100-expected.tsv",
+      "expected_rows": 780,
+      "insertion_match": 50,
+      "deletion_match": 50,
+      "queries_sha256": "c24087407c2b4fd744006781e6012ec18c7cc94ce288b9ad1a45c763e50310bc",
+      "expected_sha256": "b7be06cce861388c79631169083e523d170e6c37fe151343cf7b7f0c6c3d8246"
+    },
+    "1k": {
+      "size": 1000,
+      "queries_fasta": "queries/synth-1indel-1k.fasta",
+      "expected_tsv": "expected/synth-1indel-1k-expected.tsv",
+      "expected_rows": 7687,
+      "insertion_match": 500,
+      "deletion_match": 500,
+      "queries_sha256": "3fc748bef25e93d99389a154af6ffa79b65b7368b91567f9673e5d3ea127dc67",
+      "expected_sha256": "b9b3d8e576fc665bed77b5c6a27487d4c8e5a6bec61664a60034dc3421be673a"
+    },
+    "5k": {
+      "size": 5000,
+      "queries_fasta": "queries/synth-1indel-5k.fasta",
+      "expected_tsv": "expected/synth-1indel-5k-expected.tsv",
+      "expected_rows": 38770,
+      "insertion_match": 2500,
+      "deletion_match": 2500,
+      "queries_sha256": "5790f7587a81f5f199799eef4f45e6af72743b4daa3468743398c2e843658d39",
+      "expected_sha256": "d875b7f3bcb2ee3e6d4e7b7de464c9b95d9439f0925f654cc53caf060bd799f2"
+    }
+  }
+}

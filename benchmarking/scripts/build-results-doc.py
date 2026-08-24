@@ -52,6 +52,13 @@ TABLES = [
    'Memory — COSMIC (MB)'),
   ('cedar_indel_memory.tsv', 'Memory – CEDAR', MEMORY_COLS, MEMORY_DECIMALS, 'memory',
    'Memory — CEDAR (MB)'),
+  # Synthetic set: fabricated from the human proteome so the aligner comparison has a
+  # dataset large enough to be meaningful. Fixed at 5,000 queries -- the scaling ladder
+  # (100..1M) is a PEPMatch-vs-Brute-Force experiment and lives in its own figure.
+  ('synth_1indel_5k_benchmarking.tsv', 'Timing – Synthetic', TIMING_COLS, TIMING_DECIMALS,
+   'timing', 'Timing — Synthetic 1-indel (5,000 queries, 8–25 aa)'),
+  ('synth_1indel_5k_memory.tsv', 'Memory – Synthetic', MEMORY_COLS, MEMORY_DECIMALS,
+   'memory', 'Memory — Synthetic 1-indel (MB)'),
 ]
 
 TIMING_NOTES = [
@@ -62,6 +69,13 @@ TIMING_NOTES = [
   'size, appropriate for peptide-length queries) and "default" (blastp).',
   'COSMIC queries are uniform 9-mers (~88% deletions, ~12% insertions); CEDAR queries '
   'range 8–26 aa.',
+  'The Synthetic set is fabricated: real peptide windows sampled from the same human '
+  'proteome with one interior indel injected (50% insertion / 50% deletion, 8–25 aa). Its '
+  'ground truth is PROTEOME-WIDE — every placement in every protein, from the committed '
+  'brute-force oracle and spot-checked against an exhaustive no-prefilter scan — whereas '
+  'the COSMIC and CEDAR ground truths list only the annotated locus. Recall is therefore '
+  'NOT comparable across the synthetic and real datasets: compare methods within a table, '
+  'never one method across tables.',
   'Query preprocessing is omitted: no method preprocesses queries for indel search.',
   'All tools were pinned to the same thread count on one compute node.',
 ]
