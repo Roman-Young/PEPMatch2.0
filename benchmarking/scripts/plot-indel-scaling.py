@@ -135,23 +135,30 @@ def main():
   })
   fig, (ax_t, ax_r) = plt.subplots(1, 2, figsize=(9.2, 3.9))
 
-  # ---- left: time ------------------------------------------------------------------
+  # ---- left: SEARCH time -- the per-query algorithmic comparison. Preprocessing is a
+  #      ONE-TIME fixed cost (independent of query count) and is drawn as a separate
+  #      reference, never summed into these lines. That keeps the scaling story clean:
+  #      what these curves show is purely how each method's search cost grows with N.
   for label, method, color, marker, dash in SERIES:
-    xs, ys = series_xy(data, method, 'Total (s)')
+    xs, ys = series_xy(data, method, 'Searching (s)')
     if xs:
       ax_t.plot(xs, ys, color=color, marker=marker, linestyle=dash, linewidth=2,
                 markersize=6.5, markeredgecolor='white', markeredgewidth=0.9,
-                label=f'{label} — total', zorder=3)
-    xs, ys = series_xy(data, method, 'Searching (s)')
-    if xs:
-      ax_t.plot(xs, ys, color=color, marker=marker, linestyle=':', linewidth=1.5,
-                markersize=4.5, markerfacecolor='white', markeredgecolor=color,
-                alpha=0.85, label=f'{label} — search only', zorder=2)
+                label=f'{label} — search', zorder=3)
+
+  # PEPMatch's one-time index build, read from the data (never hardcoded -- it's ~29 s on
+  # the dev box, ~4 s on the cluster). A horizontal line because it does NOT scale with
+  # query count; Brute Force has none, so there's nothing to draw for it.
+  _, pm_pre = series_xy(data, 'PEPMatch', 'Proteome Preprocessing (s)')
+  build_s = max(pm_pre) if pm_pre else None
+  if build_s:
+    ax_t.axhline(build_s, color=BLUE, linestyle=':', linewidth=1.4, alpha=0.75, zorder=1,
+                 label=f'PEPMatch index build (one-time, ~{build_s:.0f} s)')
 
   ax_t.set_xscale('log')
   ax_t.set_yscale('log')
   ax_t.set_xlabel('Query count', fontsize=9, color=INK)
-  ax_t.set_ylabel('Time (s)', fontsize=9, color=INK)
+  ax_t.set_ylabel('Search time (s)', fontsize=9, color=INK)
   ax_t.set_title('Search time scales with query count', fontsize=10, color=INK,
                  loc='left', pad=8)
   ax_t.xaxis.set_minor_formatter(NullFormatter())
@@ -159,12 +166,8 @@ def main():
   ax_t.yaxis.set_minor_formatter(NullFormatter())
   style_axes(ax_t)
   ax_t.legend(fontsize=7.5, frameon=False, labelcolor=MUTED, loc='upper left')
-
-  # The honest caveat, on the figure rather than in a caption nobody reads.
-  ax_t.text(0.98, 0.03,
-            "PEPMatch total includes a one-time\n~29 s index build (dotted = search only)",
-            transform=ax_t.transAxes, fontsize=6.8, color=MUTED,
-            ha='right', va='bottom', linespacing=1.35)
+  # No caption: the "Search time (s)" axis and the legend's "index build (one-time)" entry
+  # already carry the meaning, and a text box here collides with the PEPMatch curve.
 
   # ---- right: recall ---------------------------------------------------------------
   for label, method, color, marker, dash in SERIES:
