@@ -4,10 +4,12 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
-# 24h, not 12h: Brute Force scales linearly (~40s per 1k queries), so the 1M point alone
-# is ~11h and the full 100->1M sweep is ~12.4h -- just over a 12h wall. The `normal` QOS
-# allows 7 days, so give it comfortable margin rather than lose the 1M point 20 min short.
-#SBATCH --time=24:00:00
+# 48h. Brute Force scales linearly (~40s per 1k queries), so the 1M point alone is ~11h
+# and the full 100->1M sweep is ~12.4h at the node051 rate. But observed node-to-node
+# variance is large (the generation job ran ~11h against a ~5h estimate), so budget for
+# several times the point estimate rather than lose a >10h run near the wall. The `normal`
+# QOS allows 7 days; a generous wall costs nothing (the job ends when it finishes).
+#SBATCH --time=48:00:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #
