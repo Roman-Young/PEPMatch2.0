@@ -91,6 +91,30 @@
                         "query": "queries/synth-1indel-1m.fasta",
                         "proteome": "proteomes/human.fasta",
                         "expected": "expected/synth-1indel-1m-expected.tsv"
+                },
+                "synth_2indel_100": {
+                        "lengths": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 23, 25],
+                        "mismatches": 1,
+                        "indels": 2,
+                        "query": "queries/synth-2indel-100.fasta",
+                        "proteome": "proteomes/human.fasta",
+                        "expected": "expected/synth-2indel-100-expected.tsv"
+                },
+                "synth_2indel_1k": {
+                        "lengths": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 23, 25],
+                        "mismatches": 1,
+                        "indels": 2,
+                        "query": "queries/synth-2indel-1k.fasta",
+                        "proteome": "proteomes/human.fasta",
+                        "expected": "expected/synth-2indel-1k-expected.tsv"
+                },
+                "synth_2indel_5k": {
+                        "lengths": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 23, 25],
+                        "mismatches": 1,
+                        "indels": 2,
+                        "query": "queries/synth-2indel-5k.fasta",
+                        "proteome": "proteomes/human.fasta",
+                        "expected": "expected/synth-2indel-5k-expected.tsv"
                 }
         },
        

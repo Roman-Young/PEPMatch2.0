@@ -32,6 +32,15 @@ NMAX="${NMAX:-1000000}"
 INDELS="${INDELS:-1}"
 SIZES="${SIZES:-100,1000,5000,10000,100000,1000000}"
 AUDIT="${AUDIT:-200}"
+# Length range. Unset => the generator's own default (8 for 1-indel, 12 for 2-indel).
+# For a 2-indel set that matches the 1-indel length composition, pass MINLEN=8 -- but note
+# 8-11mers are ~30x more expensive for 2-indel ground truth (a 2-mer seed hits ~70% of the
+# proteome), so check --cost-estimate before a large 2-indel run.
+MINLEN="${MINLEN:-}"
+MAXLEN="${MAXLEN:-}"
+LEN_ARGS=""
+[[ -n "$MINLEN" ]] && LEN_ARGS="$LEN_ARGS --min-len $MINLEN"
+[[ -n "$MAXLEN" ]] && LEN_ARGS="$LEN_ARGS --max-len $MAXLEN"
 
 echo "=== synthetic ${INDELS}-indel dataset generation ==="
 echo "job        : ${SLURM_JOB_ID:-manual}"
@@ -48,14 +57,16 @@ python3 -c 'import pandas' || { echo "FATAL: pandas missing." >&2; exit 1; }
 
 # Project the cost before committing hours to it.
 echo; echo "=== projected cost ==="
+echo "len args   :${LEN_ARGS:- (generator default)}"
 python3 "$REPO/benchmarking/scripts/build-synthetic-indel-benchmark.py" \
-  --indels "$INDELS" --n-max "$NMAX" --sizes "$SIZES" --threads "$THREADS" --cost-estimate
+  --indels "$INDELS" --n-max "$NMAX" --sizes "$SIZES" $LEN_ARGS --threads "$THREADS" --cost-estimate
 
 echo; echo "=== generating ==="
 python3 "$REPO/benchmarking/scripts/build-synthetic-indel-benchmark.py" \
   --indels "$INDELS" \
   --n-max "$NMAX" \
   --sizes "$SIZES" \
+  $LEN_ARGS \
   --threads "$THREADS" \
   --audit-sample "$AUDIT"
 

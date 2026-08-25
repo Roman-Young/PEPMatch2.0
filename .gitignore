@@ -44,9 +44,11 @@ benchmarking/expected/synth-*-10k-expected.tsv
 benchmarking/expected/synth-*-100k-expected.tsv
 benchmarking/expected/synth-*-1m-expected.tsv
 benchmarking/expected/synth-*-rejected.tsv
-# Scratch prefixes from local pipeline tests (--out-prefix synth-1indel-fixtest etc.)
+# Scratch prefixes from local pipeline tests (--out-prefix synth-*-fixtest / -test)
 benchmarking/queries/synth-*-fixtest-*
 benchmarking/expected/synth-*-fixtest-*
+benchmarking/queries/synth-*-test-*
+benchmarking/expected/synth-*-test-*
 notes.txt
 pepmatch.py
 test.csv

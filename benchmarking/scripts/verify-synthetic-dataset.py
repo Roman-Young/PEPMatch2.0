@@ -191,11 +191,16 @@ def main():
     f.check(not exact, 'no exact-match rows (brute_force.py drops these)',
             f'{len(exact)} exact rows, e.g. {exact[0]["Query Sequence"]}' if exact else '')
 
-    # length delta must be exactly the indel budget
+    # A max_indels=N search returns every match with 1..N indels, not only N: e.g. a
+    # 2-indel query also legitimately matches other proteins with a single indel. Those
+    # incidental <N-indel hits are real (PEPMatch finds them too, which is why it scores
+    # 100%), so the valid delta is the RANGE 1..indels, never exactly `indels`. Exact
+    # matches (delta 0) are excluded upstream by brute_force.py. The PLANTED delta is
+    # always exactly `indels` -- checked separately via the 50/50 balance on planted rows.
     bad_delta = [r for r in rows
-                 if abs(len(r['Matched Sequence']) - len(r['Query Sequence'])) != indels]
-    f.check(not bad_delta, f'every row differs by exactly {indels} residue(s)',
-            f'{len(bad_delta)} rows with the wrong delta' if bad_delta else '')
+                 if not 1 <= abs(len(r['Matched Sequence']) - len(r['Query Sequence'])) <= indels]
+    f.check(not bad_delta, f'every row differs by 1 to {indels} residue(s)',
+            f'{len(bad_delta)} rows outside [1,{indels}]' if bad_delta else '')
 
     # Match Type must agree with the length delta. matcher.py derives the engine's own
     # label purely from sign(len(matched) - len(query)), and the natural way to build a
@@ -229,8 +234,15 @@ def main():
     f.check(not uncovered, 'every query has >=1 expected row',
             f'{len(uncovered)} with none, e.g. {uncovered[0]}' if uncovered else '')
 
-    # 7 balance
-    balance = Counter(r['Match Type'] for r in rows if r.get('Planted') == 'yes')
+    # 7 balance -- and the defining invariant: each PLANTED match is exactly `indels`
+    # edits (the injected homogeneous indel). Incidental hits may be fewer; the planted
+    # one never is.
+    planted = [r for r in rows if r.get('Planted') == 'yes']
+    bad_planted = [r for r in planted
+                   if abs(len(r['Matched Sequence']) - len(r['Query Sequence'])) != indels]
+    f.check(not bad_planted, f'every planted row is exactly {indels} indel(s)',
+            f'{len(bad_planted)} planted rows off {indels}' if bad_planted else '')
+    balance = Counter(r['Match Type'] for r in planted)
     ins, dele = balance['insertion_match'], balance['deletion_match']
     f.check(abs(ins - dele) <= 1, '50/50 insertion/deletion balance among planted rows',
             f'{ins} ins vs {dele} del')
