@@ -1,23 +1,23 @@
 {
   "generated_by": "benchmarking/scripts/build-synthetic-indel-benchmark.py",
-  "generator_git_blob": "680270969f5d4d2556337a2f8df2e43a50ba083b",
+  "generator_git_blob": "dc9eabfcb423e3aefc707b48286acc319ebd6ef5",
   "oracle_git_blobs": {
     "indel_brute_force": "2f4c0d986ad8071261b7a6d02265016510616d70",
     "indel2_brute_force": "2bb27f227d737e4c88f0fc80b3251fb484f03e9c"
   },
   "args": {
     "indels": 1,
-    "n_max": 5000,
-    "sizes": "100,1000,5000",
+    "n_max": 1000000,
+    "sizes": "100,1000,5000,10000,100000,1000000",
     "min_len": null,
     "max_len": 25,
     "length_dist": "cedar",
     "seed": 20260823,
-    "threads": 4,
-    "proteome": "/home/roman/agent/codebases/PEPMatch2.0/benchmarking/proteomes/human.fasta",
+    "threads": 32,
+    "proteome": "/home/ryoung/projects/pepmatch/PEPMatch2.0/benchmarking/proteomes/human.fasta",
     "out_prefix": null,
     "name_prefix": null,
-    "audit_sample": 15,
+    "audit_sample": 200,
     "rejected_cap": 10000,
     "cost_estimate": false,
     "print_config": false,
@@ -54,32 +54,34 @@
     "residues": 29703862
   },
   "reconciliation": {
-    "ACCEPTED": 5000,
-    "window_crosses_protein_edge": 259
+    "ACCEPTED": 1000000,
+    "window_crosses_protein_edge": 59570,
+    "duplicate_query": 518,
+    "nonstandard_residue": 30
   },
-  "total_draws": 5259,
+  "total_draws": 1060118,
   "observed_length_histogram": {
-    "8": 233,
-    "9": 547,
-    "10": 541,
-    "11": 70,
-    "12": 209,
-    "13": 80,
-    "14": 163,
-    "15": 150,
-    "16": 70,
-    "17": 158,
-    "18": 73,
-    "20": 83,
-    "22": 161,
-    "23": 140,
-    "25": 2322
+    "8": 47033,
+    "9": 109003,
+    "10": 108512,
+    "11": 15409,
+    "12": 46636,
+    "13": 15243,
+    "14": 30636,
+    "15": 30636,
+    "16": 15192,
+    "17": 30279,
+    "18": 15087,
+    "20": 15391,
+    "22": 30160,
+    "23": 30054,
+    "25": 460729
   },
   "audit": {
-    "sampled": 15,
+    "sampled": 200,
     "ok": true,
-    "note": "exhaustive scan agreed on all 15 queries",
-    "seconds": 569.9
+    "seconds": 2211.9,
+    "note": "exhaustive scan agreed on all 200 queries"
   },
   "files": {
     "100": {
@@ -111,6 +113,36 @@
       "deletion_match": 2500,
       "queries_sha256": "5790f7587a81f5f199799eef4f45e6af72743b4daa3468743398c2e843658d39",
       "expected_sha256": "d875b7f3bcb2ee3e6d4e7b7de464c9b95d9439f0925f654cc53caf060bd799f2"
+    },
+    "10k": {
+      "size": 10000,
+      "queries_fasta": "queries/synth-1indel-10k.fasta",
+      "expected_tsv": "expected/synth-1indel-10k-expected.tsv",
+      "expected_rows": 75709,
+      "insertion_match": 5000,
+      "deletion_match": 5000,
+      "queries_sha256": "1c444fa0fa19db37ba4c94b2669a86ae8cd1fc3093d4dd5832909efd4facf2ed",
+      "expected_sha256": "f0f6f312180598bd688f08e544611bae10837d8a254e1cd28b6bd5bc13bf328e"
+    },
+    "100k": {
+      "size": 100000,
+      "queries_fasta": "queries/synth-1indel-100k.fasta",
+      "expected_tsv": "expected/synth-1indel-100k-expected.tsv",
+      "expected_rows": 786408,
+      "insertion_match": 50000,
+      "deletion_match": 50000,
+      "queries_sha256": "913235d8f313bfd756c6960f46daac98dbac503f8b1a366a6f6c2e9c151ee579",
+      "expected_sha256": "b48e63b3d8330eb27f8d202eb9db951f036780ec35a8973539aabf22561c21ca"
+    },
+    "1m": {
+      "size": 1000000,
+      "queries_fasta": "queries/synth-1indel-1m.fasta",
+      "expected_tsv": "expected/synth-1indel-1m-expected.tsv",
+      "expected_rows": 8007065,
+      "insertion_match": 500000,
+      "deletion_match": 500000,
+      "queries_sha256": "8ea43d9d75d52e119ecef27eec169801ce10fe948304744fa08b9940ca304da7",
+      "expected_sha256": "c40ee681f2f4e780950a47611bb7a8b833b7da56b4538dc215893d5f2596fc9c"
     }
   }
 }
