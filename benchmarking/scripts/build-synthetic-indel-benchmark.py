@@ -190,7 +190,10 @@ def _audit_one(query):
     for start, matched in _BF._oracle(query, _BF._SEQS[j], _BF._N):
       if len(matched) != len(query):
         rows.add((query, matched, _BF._ACCS[j], start + 1))
-  return rows
+  # Return the query alongside its rows. The caller collects these under imap_unordered,
+  # which yields in COMPLETION order -- so results MUST be keyed by this query, never
+  # paired positionally against the input list.
+  return query, rows
 
 
 def main():
@@ -430,51 +433,13 @@ def main():
     raise SystemExit(f'FATAL: {len(empty)} queries have no expected rows. First: {empty[0]}')
   print('      all planted placements present; no query left without a match')
 
-  # ---- Phase 3: exhaustive audit (breaks the circularity) -------------------------
+  # The audit runs in Phase 4, AFTER the subsets are on disk -- see the note there. It is
+  # deliberately NOT a barrier before writing: computing the ground truth costs hours, and
+  # a failure in a self-check must never be the reason that work is discarded.
   audit_report = {'sampled': 0, 'ok': True, 'note': 'skipped'}
-  if args.audit_sample > 0:
-    k = min(args.audit_sample, len(accepted))
-    # Stratify across lengths so the audit covers the cheap long queries AND the short
-    # ones where the prefilter does the most work.
-    by_len = {}
-    for q, *_ in accepted:
-      by_len.setdefault(len(q), []).append(q)
-    audit_rng = random.Random(args.seed + 1)
-    pick, lengths_cycle = [], sorted(by_len)
-    while len(pick) < k:
-      progressed = False
-      for L in lengths_cycle:
-        if by_len[L] and len(pick) < k:
-          pick.append(by_len[L].pop(audit_rng.randrange(len(by_len[L]))))
-          progressed = True
-      if not progressed:
-        break
-    print(f'[3/5] exhaustive no-prefilter audit on {len(pick)} queries...')
-    t0 = time.time()
-    if args.threads > 1:
-      with Pool(args.threads) as pool:
-        audit = list(pool.imap_unordered(_audit_one, pick, chunksize=1))
-    else:
-      audit = [_audit_one(q) for q in pick]
-    mismatches = []
-    for q, exhaustive in zip(pick, audit):
-      if exhaustive != set(truth.get(q, [])):
-        mismatches.append(q)
-    if mismatches:
-      raise SystemExit(
-        f'FATAL: prefiltered truth disagrees with the exhaustive scan for '
-        f'{len(mismatches)} queries. First: {mismatches[0]}. The prefilter is unsound '
-        f'for this dataset; the ground truth cannot be trusted.'
-      )
-    audit_report = {'sampled': len(pick), 'ok': True,
-                    'note': f'exhaustive scan agreed on all {len(pick)} queries',
-                    'seconds': round(time.time() - t0, 1)}
-    print(f'      agreed on all {len(pick)} queries ({time.time() - t0:.0f}s)')
-  else:
-    print('[3/5] audit SKIPPED (--audit-sample 0) -- ground truth is unverified')
 
-  # ---- Phase 4: emit nested subsets ------------------------------------------------
-  print('[4/5] writing nested subsets...')
+  # ---- Phase 3: emit nested subsets ------------------------------------------------
+  print('[3/5] writing nested subsets...')
   meta = {q: (w, a, off, mt) for q, w, a, off, mt in accepted}
   order = [q for q, *_ in accepted]          # acceptance order == query id order
   queries_dir, expected_dir = BENCH / 'queries', BENCH / 'expected'
@@ -550,6 +515,54 @@ def main():
       writer.writeheader()
       writer.writerows(rejected_rows)
 
+  # ---- Phase 4: exhaustive audit (breaks the circularity) -------------------------
+  # Every subset is already on disk, so this gate can never cost the ground-truth compute.
+  # It records its verdict in the manifest (audit.ok) and sets the process exit code; the
+  # benchmark preflight refuses to run unless audit.ok is true. So a real prefilter fault
+  # blocks the benchmarks WITHOUT throwing away hours of correct data.
+  if args.audit_sample > 0:
+    k = min(args.audit_sample, len(accepted))
+    # Stratify across lengths so the audit covers the cheap long queries AND the short
+    # ones where the prefilter does the most work.
+    by_len = {}
+    for q, *_ in accepted:
+      by_len.setdefault(len(q), []).append(q)
+    audit_rng = random.Random(args.seed + 1)
+    pick, lengths_cycle = [], sorted(by_len)
+    while len(pick) < k:
+      progressed = False
+      for L in lengths_cycle:
+        if by_len[L] and len(pick) < k:
+          pick.append(by_len[L].pop(audit_rng.randrange(len(by_len[L]))))
+          progressed = True
+      if not progressed:
+        break
+    print(f'[4/5] exhaustive no-prefilter audit on {len(pick)} queries...')
+    t0 = time.time()
+    # KEY results by the query each _audit_one returns -- NEVER pair positionally against
+    # `pick`. imap_unordered yields in completion order, so the i-th result is not the
+    # i-th query; positional pairing falsely failed 195/200 at 1M scale while the ground
+    # truth was perfect. dict() over (query, rows) pairs is order-independent.
+    if args.threads > 1:
+      with Pool(args.threads) as pool:
+        audit = dict(pool.imap_unordered(_audit_one, pick, chunksize=1))
+    else:
+      audit = dict(_audit_one(q) for q in pick)
+    mismatches = [q for q in pick if audit.get(q, set()) != set(truth.get(q, []))]
+    secs = round(time.time() - t0, 1)
+    if mismatches:
+      audit_report = {'sampled': len(pick), 'ok': False, 'seconds': secs,
+                      'note': f'{len(mismatches)} of {len(pick)} queries disagreed with the '
+                              f'exhaustive scan; first {mismatches[0]}'}
+      print(f'      !! {len(mismatches)}/{len(pick)} DISAGREED ({secs}s) -- see FATAL below',
+            flush=True)
+    else:
+      audit_report = {'sampled': len(pick), 'ok': True, 'seconds': secs,
+                      'note': f'exhaustive scan agreed on all {len(pick)} queries'}
+      print(f'      agreed on all {len(pick)} queries ({secs}s)')
+  else:
+    print('[4/5] audit SKIPPED (--audit-sample 0) -- ground truth is unverified')
+
   # ---- Phase 5: manifest ------------------------------------------------------------
   print('[5/5] manifest...')
   manifest = {
@@ -594,6 +607,16 @@ def main():
   print(f'  {draws:>9,}           TOTAL draws')
   print(f'\nmanifest: {manifest_path.relative_to(BENCH)}')
   print(f'done in {(time.time() - t_start) / 60:.1f} min')
+
+  # Gate LAST, so the files and the manifest (recording audit.ok=false) are already
+  # persisted. A non-zero exit stops the self-certifying sbatch before the benchmarks run,
+  # and the recorded audit status makes the benchmark preflight refuse the dataset too --
+  # but the hours of ground truth survive on disk for inspection either way.
+  if not audit_report['ok']:
+    print(f'\nFATAL: audit failed -- {audit_report["note"]}. Files were written and the '
+          f'manifest records audit.ok=false; investigate before trusting these numbers.',
+          file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == '__main__':
