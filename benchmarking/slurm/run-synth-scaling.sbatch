@@ -4,7 +4,10 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+# 24h, not 12h: Brute Force scales linearly (~40s per 1k queries), so the 1M point alone
+# is ~11h and the full 100->1M sweep is ~12.4h -- just over a 12h wall. The `normal` QOS
+# allows 7 days, so give it comfortable margin rather than lose the 1M point 20 min short.
+#SBATCH --time=24:00:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #
