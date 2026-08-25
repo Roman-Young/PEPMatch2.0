@@ -69,6 +69,29 @@ python3 "$REPO/benchmarking/scripts/verify-synthetic-dataset.py" \
   echo "FATAL: synthetic dataset failed verification -- refusing to publish numbers." >&2
   exit 1; }
 
+# Confirm every size THIS job will iterate actually exists before starting. The verifier
+# above only checks the sizes the manifest happens to describe, so a generation run with a
+# smaller --n-max than $SIZES would sail past it and then die mid-sweep -- hours in, after
+# the cheap points have already burned a node.
+echo; echo "=== pre-flight: every requested size is present ==="
+missing=0
+for size in $SIZES; do
+  q="$REPO/benchmarking/queries/synth-${INDELS}indel-${size}.fasta"
+  e="$REPO/benchmarking/expected/synth-${INDELS}indel-${size}-expected.tsv"
+  for path in "$q" "$e"; do
+    if [[ ! -f "$path" ]]; then
+      echo "  MISSING: $path" >&2
+      missing=1
+    fi
+  done
+  [[ -f "$q" && -f "$e" ]] && echo "  ok: $size"
+done
+if [[ "$missing" -ne 0 ]]; then
+  echo "FATAL: sizes requested in SIZES='$SIZES' are not on disk. Generate them first" >&2
+  echo "       (slurm/run-synth-generate.sbatch) or narrow SIZES." >&2
+  exit 1
+fi
+
 for size in $SIZES; do
   dataset="synth_${INDELS}indel_${size}"
   echo

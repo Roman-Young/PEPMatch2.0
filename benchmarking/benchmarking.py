@@ -368,9 +368,21 @@ def run_benchmark(benchmark, include_memory=False, include_text_shifting=False, 
 
   pin_threads(threads)
 
-  expected_df = pd.read_csv(
-    Path(__file__).parent / dataset['expected'], sep='\t'
-  )
+  # This read sits OUTSIDE the per-method try/except below, so a missing file aborts the
+  # whole run rather than recording one FAILED row -- and under `set -euo pipefail` that
+  # kills the remaining sweep points too. A dataset can be registered in the JSON without
+  # its files existing (e.g. generation run with a smaller --n-max than the sweep's
+  # SIZES), so say exactly what is missing instead of surfacing a bare FileNotFoundError.
+  expected_path = Path(__file__).parent / dataset['expected']
+  if not expected_path.exists():
+    raise SystemExit(
+      f"FATAL: {benchmark!r} expects {dataset['expected']} but that file does not exist.\n"
+      f"  Looked in: {expected_path}\n"
+      f"  The dataset is registered in benchmarking_parameters.json but was never "
+      f"generated -- run slurm/run-synth-generate.sbatch with an --n-max that covers "
+      f"this size, or drop this size from the sweep."
+    )
+  expected_df = pd.read_csv(expected_path, sep='\t')
 
   rows = []
   output_path = str(results_dir() / f'{benchmark}_benchmarking.tsv')

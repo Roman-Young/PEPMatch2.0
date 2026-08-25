@@ -41,6 +41,7 @@ import argparse
 import csv
 import hashlib
 import json
+import random
 import sys
 from collections import Counter
 from pathlib import Path
@@ -260,14 +261,25 @@ def main():
   print('\n--- interior-edit check (engine definition) ---')
   try:
     from pepmatch.matcher import _indel_placements
-    sample = largest_rows if len(largest_rows) <= 200000 else largest_rows[:200000]
+    # RANDOM sample, never a prefix. The expected TSV is sorted by Query Sequence, so
+    # largest_rows[:CAP] is every alphabetically-early query -- it systematically skips
+    # the rest of the composition space, so an interiority bug confined to (say) queries
+    # starting W/Y/V would pass a gate that looks like it covered 200k rows. Seeded so
+    # the check is reproducible, and the coverage fraction is PRINTED rather than implied.
+    CAP = 200_000
+    if len(largest_rows) <= CAP:
+      sample = largest_rows
+    else:
+      sample = random.Random(20260825).sample(largest_rows, CAP)
+    pct = 100.0 * len(sample) / max(len(largest_rows), 1)
     non_interior = [r for r in sample
                     if not _indel_placements(r['Query Sequence'], r['Matched Sequence'])]
     f.check(not non_interior,
             'every row has a legal non-terminal placement per _indel_placements',
             (f'{len(non_interior)} illegal, e.g. {non_interior[0]["Query Sequence"]} vs '
              f'{non_interior[0]["Matched Sequence"]}') if non_interior
-            else f'{len(sample):,} rows')
+            else f'{len(sample):,}/{len(largest_rows):,} rows sampled at random '
+                 f'({pct:.1f}% coverage)')
   except ImportError as exc:
     f.check(False, 'import pepmatch.matcher._indel_placements', str(exc))
 

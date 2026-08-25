@@ -253,6 +253,15 @@ def main():
                     if s <= args.n_max} | {args.n_max})
   if sizes[-1] > args.n_max:
     raise SystemExit(f'--sizes asks for {sizes[-1]} but --n-max is {args.n_max}')
+  if sizes[-1] < args.n_max:
+    # Ground truth is computed for all n_max queries but only the requested subsets are
+    # emitted, so this silently throws away compute -- at 1M that is hours. Warn loudly
+    # rather than fail: it is occasionally what you want (e.g. deliberately sampling).
+    waste = 100.0 * (args.n_max - sizes[-1]) / args.n_max
+    print(f'WARNING: largest --sizes entry is {sizes[-1]:,} but --n-max is '
+          f'{args.n_max:,}. Ground truth will be computed for all {args.n_max:,} queries '
+          f'and {waste:.1f}% of it discarded unwritten. Set --n-max {sizes[-1]} to avoid '
+          f'that, or add {args.n_max} to --sizes.', flush=True)
 
   draw_length, weights = build_length_sampler(args.length_dist, min_len, max_len)
 
