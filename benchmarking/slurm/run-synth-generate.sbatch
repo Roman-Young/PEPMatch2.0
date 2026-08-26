@@ -4,7 +4,13 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+# 48h. 1-indel generation is ~6.5h at 1M on 32 cores, but 2-indel ground truth is far
+# costlier -- with --min-len 8 the short (8-11mer) queries are ~30x worse (a 2-mer seed
+# hits ~70% of the proteome), so a 100k 2-indel run can run many hours. Node-to-node
+# variance is also large (the 1M 1-indel run took ~11h vs a ~5h estimate). QOS `normal`
+# allows 7 days; a generous wall costs nothing (the job ends when it finishes) and avoids
+# losing a long overnight run near the wall.
+#SBATCH --time=48:00:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #
