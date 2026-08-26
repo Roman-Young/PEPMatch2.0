@@ -55,10 +55,16 @@ TABLES = [
   # Synthetic set: fabricated from the human proteome so the aligner comparison has a
   # dataset large enough to be meaningful. Fixed at 5,000 queries -- the scaling ladder
   # (100..1M) is a PEPMatch-vs-Brute-Force experiment and lives in its own figure.
-  ('synth_1indel_5k_benchmarking.tsv', 'Timing – Synthetic', TIMING_COLS, TIMING_DECIMALS,
+  ('synth_1indel_5k_benchmarking.tsv', 'Timing – Synth 1-indel', TIMING_COLS, TIMING_DECIMALS,
    'timing', 'Timing — Synthetic 1-indel (5,000 queries, 8–25 aa)'),
-  ('synth_1indel_5k_memory.tsv', 'Memory – Synthetic', MEMORY_COLS, MEMORY_DECIMALS,
+  ('synth_1indel_5k_memory.tsv', 'Memory – Synth 1-indel', MEMORY_COLS, MEMORY_DECIMALS,
    'memory', 'Memory — Synthetic 1-indel (MB)'),
+  # 2-indel set: same fabrication, two interior indels (homogeneous — all 2-insertion or
+  # all 2-deletion per query). Harder to align, so the aligner-recall gap over PEPMatch widens.
+  ('synth_2indel_5k_benchmarking.tsv', 'Timing – Synth 2-indel', TIMING_COLS, TIMING_DECIMALS,
+   'timing', 'Timing — Synthetic 2-indel (5,000 queries, 8–25 aa)'),
+  ('synth_2indel_5k_memory.tsv', 'Memory – Synth 2-indel', MEMORY_COLS, MEMORY_DECIMALS,
+   'memory', 'Memory — Synthetic 2-indel (MB)'),
 ]
 
 TIMING_NOTES = [
@@ -69,8 +75,9 @@ TIMING_NOTES = [
   'size, appropriate for peptide-length queries) and "default" (blastp).',
   'COSMIC queries are uniform 9-mers (~88% deletions, ~12% insertions); CEDAR queries '
   'range 8–26 aa.',
-  'The Synthetic set is fabricated: real peptide windows sampled from the same human '
-  'proteome with one interior indel injected (50% insertion / 50% deletion, 8–25 aa). Its '
+  'The Synthetic sets are fabricated: real peptide windows sampled from the same human '
+  'proteome with interior indels injected — one indel (1-indel set) or two (2-indel set), '
+  'each set homogeneous in count and 50% insertion / 50% deletion, 8–25 aa. Their '
   'ground truth is PROTEOME-WIDE — every placement in every protein, from the committed '
   'brute-force oracle and spot-checked against an exhaustive no-prefilter scan — whereas '
   'the COSMIC and CEDAR ground truths list only the annotated locus. Recall is therefore '
@@ -158,7 +165,7 @@ def write_xlsx(loaded):
 
 
 def write_markdown(loaded):
-  lines = ['# PEPMatch 1-indel benchmark — results', '']
+  lines = ['# PEPMatch indel benchmark — results', '']
   for _sheet, title, df, notes in loaded:
     lines.append(f'## {title}')
     lines.append('')
