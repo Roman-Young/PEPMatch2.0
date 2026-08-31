@@ -148,6 +148,11 @@
                         "method_parameters":{}
                 },
                 {
+                        "name": "brute_force_naive",
+                        "text_shifting": 0,
+                        "method_parameters":{}
+                },
+                {
                         "name": "blast",
                         "label": "blast (short)",
                         "text_shifting": 0,

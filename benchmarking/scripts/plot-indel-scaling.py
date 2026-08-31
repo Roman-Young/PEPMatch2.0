@@ -45,10 +45,20 @@ BLUE, ORANGE = '#2a78d6', '#eb6834'
 INK, MUTED, GRID, AXIS = '#0b0b0b', '#898781', '#e1e0d9', '#c3c2b7'
 
 SERIES = [
-  # label,         tsv Method value, color,  marker, linestyle
-  ('PEPMatch 2.0', 'PEPMatch',       BLUE,   'o',    '-'),
-  ('Brute Force',  'Brute Force',    ORANGE, 's',    '--'),
+  # label,                  tsv Method value,       color,  marker, linestyle
+  ('PEPMatch 2.0',          'PEPMatch',             BLUE,   'o',    '-'),
+  ('Brute Force (naive)',   'Brute Force (naive)',  ORANGE, 's',    '--'),
 ]
+
+# The pre-2026-08-31 baseline. `brute_force` narrowed candidates with a pigeonhole
+# prefilter -- PEPMatch's own seeding strategy -- so a figure built from it compares
+# PEPMatch against a method running PEPMatch's algorithm and UNDERSTATES the speedup. It
+# is refused rather than plotted: silently drawing it under the label "Brute Force" is the
+# exact confusion this rebuild exists to end. Re-run the sweep with brute_force_naive.
+RETIRED_METHODS = {
+  'Brute Force': 'the pigeonhole-prefiltered baseline retired 2026-08-31 '
+                 '(re-run with BF_METHOD=brute_force_naive)',
+}
 
 SIZE_LABELS = [('100', 100), ('1k', 1_000), ('5k', 5_000), ('10k', 10_000),
                ('100k', 100_000), ('1m', 1_000_000)]
@@ -121,7 +131,17 @@ def main():
 
   print(f'loaded methods: {", ".join(sorted(data))}')
   for method in sorted(data):
-    print(f'  {method:14s} N = {sorted(data[method])}')
+    print(f'  {method:20s} N = {sorted(data[method])}')
+
+  # Refuse a retired baseline instead of plotting a figure with a missing curve. Without
+  # this the series simply would not be found and the figure would render with PEPMatch
+  # alone -- a publishable-looking chart quietly missing the comparison it exists to make.
+  plotted = {m for _, m, *_ in SERIES}
+  for retired, why in RETIRED_METHODS.items():
+    if retired in data and not (data.keys() & plotted - {'PEPMatch'}):
+      raise SystemExit(
+        f'FATAL: {results_dir} holds results from "{retired}" -- {why}.\n'
+        f'       Refusing to plot: the figure would silently render without a baseline.')
   if missing:
     print('\nMISSING / NOT-OK points (plotted as gaps, never interpolated):')
     for n, why in missing:
