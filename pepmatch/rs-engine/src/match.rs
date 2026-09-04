@@ -576,6 +576,28 @@ fn metadata_columns(index: &PepIndex) -> MetaColumns {
     (pnum, a, b, c, d, e, g, h, i, j)
 }
 
+/// Experimental, gated by PEPMATCH_SEED_STRATEGY=first (default off): the minimal pigeonhole
+/// seed set -- the first n+1 disjoint k-mers. n edits damage at most n of them, so at least
+/// one survives any <=n-indel match; extend_bidirectional then reconstructs the full match
+/// from that surviving anchor. Purpose: measure the candidate-work reduction from dropping
+/// the redundant tiles the current full coverage looks up. Recall equivalence is validated
+/// against the brute-force oracle (benchmarking/scripts/validate-seed-reduction.py).
+fn pigeonhole_seeds(query: &[u8], k: usize, n: usize) -> Vec<(&[u8], usize)> {
+    let mut seeds: Vec<(&[u8], usize)> = Vec::new();
+    for i in 0..=n {
+        let start = i * k;
+        if start + k <= query.len() {
+            seeds.push((&query[start..start + k], start));
+        }
+    }
+    // The Python layer guarantees k <= min_len/(n+1), so n+1 disjoint k-mers always fit;
+    // fall back to full coverage rather than silently under-seed if that ever changes.
+    if seeds.len() < n + 1 {
+        return minimal_coverage_seeds(query, k);
+    }
+    seeds
+}
+
 fn minimal_coverage_seeds(query: &[u8], k: usize) -> Vec<(&[u8], usize)> {
     let query_len = query.len();
     let mut seeds: Vec<(&[u8], usize)> = Vec::new();
@@ -737,7 +759,10 @@ fn indel_search_peptide(
         return vec![miss_record(query_id, peptide)];
     }
 
-    let seeds = minimal_coverage_seeds(pep_bytes, k);
+    let seeds = match std::env::var("PEPMATCH_SEED_STRATEGY").as_deref() {
+        Ok("first") => pigeonhole_seeds(pep_bytes, k, indels_allowed),
+        _ => minimal_coverage_seeds(pep_bytes, k),
+    };
     let mut seen: HashSet<(usize, usize, Vec<u8>)> = HashSet::new();
     let mut records: Vec<HitRecord> = Vec::new();
 
