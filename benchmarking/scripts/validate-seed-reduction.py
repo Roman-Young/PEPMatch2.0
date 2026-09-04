@@ -73,6 +73,9 @@ def main():
   ap.add_argument('--prefix', required=True)
   ap.add_argument('--size', required=True)
   ap.add_argument('--indels', type=int, required=True)
+  ap.add_argument('--strategy', default='first', choices=['first', 'rarest'],
+                  help="reduced strategy to check: 'first' (n+1 disjoint) or "
+                       "'rarest' (n+1 rarest disjoint = #1+#2).")
   args = ap.parse_args()
 
   qfasta = BENCH / 'queries' / f'{args.prefix}-{args.size}.fasta'
@@ -83,13 +86,13 @@ def main():
 
   tmp = BENCH / 'results' / '_seedcheck'
   tmp.mkdir(parents=True, exist_ok=True)
-  all_out, first_out = tmp / 'all.tsv', tmp / 'first.tsv'
+  all_out, first_out = tmp / 'all.tsv', tmp / f'{args.strategy}.tsv'
 
-  print(f'query set : {qfasta.name}   (n={args.indels})')
+  print(f'query set : {qfasta.name}   (n={args.indels})   reduced strategy: {args.strategy}')
   print('running strategy=all  ...', flush=True)
   run_engine(qfasta, args.indels, 'all', all_out)
-  print('running strategy=first...', flush=True)
-  run_engine(qfasta, args.indels, 'first', first_out)
+  print(f'running strategy={args.strategy}...', flush=True)
+  run_engine(qfasta, args.indels, args.strategy, first_out)
 
   all_rows, first_rows = load(all_out), load(first_out)
   oracle = load(expected, cols4=False)

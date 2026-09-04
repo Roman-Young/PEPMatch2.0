@@ -138,6 +138,24 @@ impl PepIndex {
         None
     }
 
+    /// Position count for a k-mer without materializing the positions -- used by the
+    /// rarest-seed selector to compare tile selectivity cheaply. Same binary search as
+    /// lookup; reads only the u32 count. Absent k-mer -> 0 (a tile occurring nowhere is the
+    /// most selective seed possible: it anchors no candidates).
+    fn seed_count(&self, kmer: &[u8]) -> usize {
+        let mut lo = 0usize;
+        let mut hi = self.num_kmers;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.kmer_at(mid).cmp(kmer) {
+                std::cmp::Ordering::Equal => return self.positions_at(mid).len() / 8,
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        0
+    }
+
     fn read_metadata_str(&self, pos: usize) -> (&str, usize) {
         let len = u16::from_le_bytes(self.mmap[pos..pos + 2].try_into().unwrap()) as usize;
         let s = std::str::from_utf8(&self.mmap[pos + 2..pos + 2 + len]).unwrap_or("");
@@ -598,6 +616,35 @@ fn pigeonhole_seeds(query: &[u8], k: usize, n: usize) -> Vec<(&[u8], usize)> {
     seeds
 }
 
+/// Experimental, gated by PEPMATCH_SEED_STRATEGY=rarest (default off): #1 + #2 together.
+/// Among the disjoint query tiles, pick the n+1 with the FEWEST proteome occurrences.
+/// Correctness is identical to any n+1 disjoint seeds -- the pigeonhole guarantee only
+/// needs disjointness, so which disjoint seeds you pick is a free choice -- but rare seeds
+/// pull far fewer candidates, so verification does less work (biggest win on low-complexity
+/// queries, where a common tile like AAA would otherwise explode). Seeds are returned in
+/// query order for deterministic extension.
+fn rarest_pigeonhole_seeds<'a>(
+    query: &'a [u8],
+    k: usize,
+    n: usize,
+    index: &PepIndex,
+) -> Vec<(&'a [u8], usize)> {
+    let mut tiles: Vec<(&[u8], usize)> = Vec::new();
+    let mut j = 0;
+    while j + k <= query.len() {
+        tiles.push((&query[j..j + k], j));
+        j += k;
+    }
+    if tiles.len() < n + 1 {
+        return minimal_coverage_seeds(query, k);
+    }
+    let mut order: Vec<usize> = (0..tiles.len()).collect();
+    order.sort_by_key(|&i| index.seed_count(tiles[i].0));
+    let mut chosen: Vec<usize> = order.into_iter().take(n + 1).collect();
+    chosen.sort_unstable();
+    chosen.into_iter().map(|i| tiles[i]).collect()
+}
+
 fn minimal_coverage_seeds(query: &[u8], k: usize) -> Vec<(&[u8], usize)> {
     let query_len = query.len();
     let mut seeds: Vec<(&[u8], usize)> = Vec::new();
@@ -761,6 +808,7 @@ fn indel_search_peptide(
 
     let seeds = match std::env::var("PEPMATCH_SEED_STRATEGY").as_deref() {
         Ok("first") => pigeonhole_seeds(pep_bytes, k, indels_allowed),
+        Ok("rarest") => rarest_pigeonhole_seeds(pep_bytes, k, indels_allowed, index),
         _ => minimal_coverage_seeds(pep_bytes, k),
     };
     let mut seen: HashSet<(usize, usize, Vec<u8>)> = HashSet::new();

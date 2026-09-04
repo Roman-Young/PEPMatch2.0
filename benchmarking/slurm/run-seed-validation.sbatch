@@ -34,13 +34,16 @@ echo "=== host $(hostname)   branch $(git branch --show-current)   started $(dat
 echo "=== building the gated engine (fast: target/ is warm) ==="
 maturin develop --release || { echo "FATAL: engine build failed" >&2; exit 1; }
 
+# STRATEGY defaults to the #1+#2 candidate (rarest). Override with STRATEGY=first to check
+# the plain n+1 reduction instead.
+STRATEGY="${STRATEGY:-rarest}"
 status=0
 for spec in "synth-1indel 1" "synth-2indel 2"; do
   set -- $spec
   prefix=$1; n=$2
   echo
-  echo "############################ ${n}-indel 100k ############################"
-  python3 benchmarking/scripts/validate-seed-reduction.py --prefix "$prefix" --size 100k --indels "$n" \
+  echo "################### ${n}-indel 100k  (strategy=${STRATEGY}) ###################"
+  python3 benchmarking/scripts/validate-seed-reduction.py --prefix "$prefix" --size 100k --indels "$n" --strategy "$STRATEGY" \
     || { echo ">>> ${n}-indel VALIDATE returned nonzero (see rows above)"; status=1; }
   python3 benchmarking/scripts/classify-seed-survivors.py --prefix "$prefix" --size 100k --indels "$n" || true
 done
