@@ -566,8 +566,15 @@ class Matcher:
       return pl.DataFrame(schema=schema)
 
     if is_indels:
-      positions = [format_indel_positions(q, m) if m is not None else None
-                   for q, m in zip(qseq, matched)]
+      # The annotation depends only on (query, matched), and the same matched peptide
+      # recurs across many proteins (most hit rows repeat a pair), so annotate each
+      # distinct pair once and reuse it.
+      annotations = {}
+      positions = []
+      for q, m in zip(qseq, matched):
+        if m is not None and (q, m) not in annotations:
+          annotations[(q, m)] = format_indel_positions(q, m)
+        positions.append(annotations[(q, m)] if m is not None else None)
     else:
       positions = mutated
 
