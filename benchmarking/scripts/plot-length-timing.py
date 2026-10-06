@@ -103,9 +103,8 @@ def main():
 
     fx, fy, fk = series('fixed-k')
     if fx:
-      fixed = max(set(fk), key=fk.count)
       ax.plot(fx, fy, color=BLUE, marker='^', markerfacecolor='white', linestyle='--',
-              linewidth=1.6, markersize=6, label=f'PEPMatch 2.0, fixed k = {fixed}',
+              linewidth=1.6, markersize=6, label='PEPMatch 2.0, fixed k (4 for 1 indel, 3 for 2)',
               zorder=3)
     if xs:
       ax.plot(xs, ys, color=BLUE, marker='o', linestyle='-', linewidth=2, markersize=6.5,
@@ -133,7 +132,6 @@ def main():
     ax.set_title(f'{d} indel{"s" if d > 1 else ""}', fontsize=10, color=INK, loc='left',
                  pad=8)
     style_axes(ax)
-    ax.legend(fontsize=7.2, frameon=False, labelcolor=MUTED, loc='upper right')
 
   if lows:
     # Shared y-axis: set ONCE from the lowest point in either panel, or the last panel's
@@ -143,7 +141,14 @@ def main():
   info = dict(line.rstrip('\n').split('\t', 1) for line in open(results / 'run-info.txt'))
   fig.text(0.995, 0.005, 'Numbers under points: seed length k. Engine-only marginal time, '
            f'{info["threads"]} threads.', fontsize=6.5, color=MUTED, ha='right', va='bottom')
-  fig.tight_layout(rect=(0, 0.03, 1, 1))
+  # One shared legend above both panels: inside an axis it lands on the brute-force line,
+  # which sits near the top of every panel.
+  handles, labels = axes[0][0].get_legend_handles_labels()
+  order = [labels.index(lab) for lab in sorted(labels, key=lambda lab: ('Brute' in lab, 'fixed' in lab))]
+  fig.legend([handles[i] for i in order], [labels[i] for i in order], loc='upper center',
+             ncol=3, fontsize=7.5, frameon=False, labelcolor=MUTED,
+             bbox_to_anchor=(0.5, 1.0))
+  fig.tight_layout(rect=(0, 0.03, 1, 0.93))
   stem = outdir / 'per-length-timing'
   for ext in ('pdf', 'png'):
     fig.savefig(f'{stem}.{ext}', dpi=300, bbox_inches='tight', facecolor='white')
