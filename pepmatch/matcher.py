@@ -1,6 +1,5 @@
 import os
 import polars as pl
-from itertools import combinations
 from pathlib import Path
 from Bio import SeqIO
 from ._rs import rs_preprocess, rs_match, rs_discontinuous, rs_metadata, rs_match_counts, rs_indel_match
@@ -50,30 +49,44 @@ def _indel_placements(query, matched):
   """Every valid placement of the edits between `query` and `matched`, each a tuple of
   (1-based query position, residue) per edit; a repeat makes placements equivalent.
   Query-terminal deletions and boundary insertions are barred, and an inserted
-  residue's position counts the query residues preceding it."""
+  residue's position counts the query residues preceding it.
+
+  Removing n positions from the longer string splits it into n + 1 stretches, and
+  stretch t must equal the shorter string shifted by t residues. Placements are read
+  off precomputed agreement runs for each shift, left to right so they come out in
+  lexicographic order (_indel_edits reads placements[0]), instead of rebuilding the
+  string for every combination of positions."""
   L, M = len(query), len(matched)
   n = abs(M - L)
   if n == 0:
     return []
-  out = []
+  longer, shorter = (query, matched) if M < L else (matched, query)
+  N = len(longer)
+  # runs[s][x]: consecutive positions from x where longer[y + s] == shorter[y].
+  runs = []
+  for s in range(n + 1):
+    run = [0] * (N + 1)
+    for x in range(len(shorter) - 1, -1, -1):
+      if x + s < N and longer[x + s] == shorter[x]:
+        run[x] = run[x + 1] + 1
+    runs.append(run)
+
+  combos = []
+
+  def place(t, start, combo):
+    if t == n:
+      if runs[n][start - n] >= N - start:
+        combos.append(combo)
+      return
+    for c in range(max(start, 1), N - 1):   # never an end residue: the terminal rule
+      if c - start > runs[t][start - t]:
+        break
+      place(t + 1, c + 1, combo + (c,))
+
+  place(0, 0, ())
   if M < L:
-    for combo in combinations(range(1, L - 1), n):
-      if ''.join(query[i] for i in range(L) if i not in combo) == matched:
-        out.append(tuple((i + 1, query[i]) for i in combo))
-  else:
-    for combo in combinations(range(M), n):
-      if ''.join(matched[i] for i in range(M) if i not in combo) != query:
-        continue
-      placement = []
-      for k in combo:
-        p = sum(1 for x in range(k) if x not in combo) + 1
-        if p == 1 or p == L + 1:
-          placement = None
-          break
-        placement.append((p, matched[k]))
-      if placement:
-        out.append(tuple(placement))
-  return out
+    return [tuple((i + 1, query[i]) for i in combo) for combo in combos]
+  return [tuple((k - u + 1, matched[k]) for u, k in enumerate(combo)) for combo in combos]
 
 
 def _indel_edits(query, matched):
@@ -262,15 +275,15 @@ class Matcher:
       if self.max_indels > 0:
         linear_df = self.indel_search()
       elif self.best_match and self.k_specified:
-        results = self._search(self.k, self.max_mismatches)
-        linear_df = self._best_match_filter(self._to_dataframe(results))
+        results, pepidx_path = self._search(self.k, self.max_mismatches)
+        linear_df = self._best_match_filter(self._to_dataframe(results, pepidx_path))
       elif self.best_match:
         linear_df = self.best_match_search()
       else:
         k = self.k if self.k_specified else self._auto_k(self.max_mismatches)
         self._recall_warning(k, self.max_mismatches)
-        results = self._search(k, self.max_mismatches)
-        linear_df = self._to_dataframe(results)
+        results, pepidx_path = self._search(k, self.max_mismatches)
+        linear_df = self._to_dataframe(results, pepidx_path)
 
     if self.discontinuous_epitopes:
       pepidx_path = self._pepidx_path(2)
@@ -280,7 +293,7 @@ class Matcher:
         (qid, residues) for qid, residues in self.discontinuous_epitopes.items()
       ]
       results = rs_discontinuous(pepidx_path, epitopes, self.max_mismatches)
-      discontinuous_df = self._to_dataframe(results)
+      discontinuous_df = self._to_dataframe(results, pepidx_path)
 
     dfs = [d for d in [linear_df, discontinuous_df] if d.height > 0]
     df = pl.concat(dfs, how="vertical_relaxed") if dfs else linear_df
@@ -310,6 +323,7 @@ class Matcher:
       groups.setdefault(self._clamp_k(rest_optimal), []).extend(rest)
 
     combined = [[] for _ in range(8)]
+    metadata_path = None
     for k, queries in sorted(groups.items()):
       self._recall_warning(k, n, queries)
       pepidx_path = self._pepidx_path(k)
@@ -321,7 +335,8 @@ class Matcher:
             f"(k={k}, max_indels={n})...")
       for i, column in enumerate(rs_indel_match(pepidx_path, queries, n)):
         combined[i].extend(column)
-    return self._to_dataframe(combined, is_indels=True)
+      metadata_path = pepidx_path
+    return self._to_dataframe(combined, metadata_path, is_indels=True)
 
   def _clamp_k(self, optimal):
     """Resolve k for one query group: an explicit k is honored up to `optimal`, above
@@ -357,14 +372,16 @@ class Matcher:
     )
 
   def _search(self, k, max_mismatches, peptides=None):
-    """Search `peptides` (default: the whole query) at k, building the index if absent."""
+    """Search `peptides` (default: the whole query) at k, building the index if absent.
+    Returns the hit columns and the .pepidx they came from, so the metadata join reads
+    the index this search used rather than rediscovering one by name."""
     pepidx_path = self._pepidx_path(k)
     if not os.path.isfile(pepidx_path):
       print(f"Preprocessing {self.proteome_name} with k={k}...")
       rs_preprocess(self.proteome_file, k, pepidx_path)
     query = peptides or self.query
     print(f"Searching {len(query)} peptides against {self.proteome_name} (k={k}, max_mismatches={max_mismatches})...")
-    return rs_match(pepidx_path, query, k, max_mismatches)
+    return rs_match(pepidx_path, query, k, max_mismatches), pepidx_path
 
   def _search_counts(self, k, max_mismatches):
     """Count hits per (peptide, mismatch level) at k, building the index if absent."""
@@ -396,6 +413,7 @@ class Matcher:
     nothing is left unmatched."""
     peptides_remaining = self.query.copy()
     acc = tuple([] for _ in range(8))   # 8 columnar accumulators
+    pepidx_path = None
 
     def collect_matched(cols):
       matched_ids = set()
@@ -421,7 +439,8 @@ class Matcher:
       max_mm = (min_len // k) - 1
       if max_mm < 0:
         max_mm = 0
-      matched_ids = collect_matched(self._search(k, max_mm, peptides_remaining))
+      results, pepidx_path = self._search(k, max_mm, peptides_remaining)
+      matched_ids = collect_matched(results)
       peptides_remaining = [
         (qid, seq) for qid, seq in peptides_remaining if qid not in matched_ids
       ]
@@ -434,7 +453,8 @@ class Matcher:
         if max_mm >= shortest_len:
           break
         max_mm += 1
-        matched_ids = collect_matched(self._search(2, max_mm, peptides_remaining))
+        results, pepidx_path = self._search(2, max_mm, peptides_remaining)
+        matched_ids = collect_matched(results)
         peptides_remaining = [
           (qid, seq) for qid, seq in peptides_remaining if qid not in matched_ids
         ]
@@ -444,7 +464,7 @@ class Matcher:
       for j, val in enumerate((qid, seq, None, None, None, "[]", None, None)):
         acc[j].append(val)
 
-    df = self._to_dataframe(acc)
+    df = self._to_dataframe(acc, pepidx_path)
     return self._best_match_filter(df)
 
   def _best_match_filter(self, df):
@@ -504,14 +524,11 @@ class Matcher:
 
     return pl.concat([matched_df, unmatched_df], how="vertical_relaxed")
 
-  def _metadata_table(self) -> pl.DataFrame:
-    """Per-protein metadata (built once from this proteome's index) for the edge join."""
-    import glob
-    pattern = os.path.join(self.preprocessed_files_path, f'{self.proteome_name}_*mers.pepidx')
-    idx_files = glob.glob(pattern)
-    if not idx_files:
-      raise FileNotFoundError(f'No .pepidx for {self.proteome_name} in {self.preprocessed_files_path}')
-    pnum, pid, name, species, taxon, gene, exist, seqver, geneprio, swiss = rs_metadata(idx_files[0])
+  def _metadata_table(self, pepidx_path: str) -> pl.DataFrame:
+    """Per-protein metadata read from `pepidx_path`, the index the search just used.
+    Protein numbers are that index's own FASTA ordinals, so any other file -- including
+    one whose name merely shares this proteome's prefix -- would misattribute every hit."""
+    pnum, pid, name, species, taxon, gene, exist, seqver, geneprio, swiss = rs_metadata(pepidx_path)
     m = pl.DataFrame({
       'protein_num': pl.Series(pnum, dtype=pl.UInt32),
       'Protein ID': pid, 'Protein Name': name, 'Species': species, 'Taxon ID': taxon,
@@ -542,11 +559,13 @@ class Matcher:
       'Protein Existence Level','Gene Priority','SwissProt Reviewed',
     ]
 
-  def _to_dataframe(self, cols, is_indels=False):
+  def _to_dataframe(self, cols, pepidx_path, is_indels=False):
     """Build the results frame from the columnar Rust output, joining protein metadata
-    once instead of cloning it into every hit row. rs_indel_match reuses the mismatch
-    slot for its edit count, so only the column name differs by mode; indel positions
-    are derived here from (query, matched) rather than in Rust, and miss rows stay null."""
+    from `pepidx_path` once instead of cloning it into every hit row. rs_indel_match
+    reuses the mismatch slot for its edit count, so only the column name differs by
+    mode; indel positions are derived here from (query, matched) rather than in Rust,
+    once per distinct pair since a matched peptide often recurs across proteins, and
+    miss rows stay null."""
     qid, qseq, matched, pnum, mm, mutated, istart, iend = cols
 
     edit_col = 'Indels' if is_indels else 'Mismatches'
@@ -561,8 +580,12 @@ class Matcher:
       return pl.DataFrame(schema=schema)
 
     if is_indels:
-      positions = [format_indel_positions(q, m) if m is not None else None
-                   for q, m in zip(qseq, matched)]
+      annotations = {}
+      positions = []
+      for q, m in zip(qseq, matched):
+        if m is not None and (q, m) not in annotations:
+          annotations[(q, m)] = format_indel_positions(q, m)
+        positions.append(annotations[(q, m)] if m is not None else None)
     else:
       positions = mutated
 
@@ -577,7 +600,7 @@ class Matcher:
       'Index end': pl.Series(iend, dtype=pl.Int64),
     })
 
-    df = base.join(self._metadata_table(), on='protein_num', how='left').drop('protein_num')
+    df = base.join(self._metadata_table(pepidx_path), on='protein_num', how='left').drop('protein_num')
 
     if self.sequence_version:
       df = df.with_columns(
