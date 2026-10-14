@@ -55,35 +55,46 @@ def _indel_placements(query, matched):
   stretch t must equal the shorter string shifted by t residues. Placements are read
   off precomputed agreement runs for each shift, left to right so they come out in
   lexicographic order (_indel_edits reads placements[0]), instead of rebuilding the
-  string for every combination of positions."""
+  string for every combination of positions. With one edit that reduces to two numbers:
+  position c is valid when the strings agree before it (common prefix) and after it
+  (common suffix), so the valid positions are one run, read off those two lengths."""
   L, M = len(query), len(matched)
   n = abs(M - L)
   if n == 0:
     return []
   longer, shorter = (query, matched) if M < L else (matched, query)
   N = len(longer)
-  # runs[s][x]: consecutive positions from x where longer[y + s] == shorter[y].
-  runs = []
-  for s in range(n + 1):
-    run = [0] * (N + 1)
-    for x in range(len(shorter) - 1, -1, -1):
-      if x + s < N and longer[x + s] == shorter[x]:
-        run[x] = run[x + 1] + 1
-    runs.append(run)
+  if n == 1:
+    prefix = 0
+    while prefix < N - 1 and longer[prefix] == shorter[prefix]:
+      prefix += 1
+    suffix = 0
+    while suffix < N - 1 and longer[N - 1 - suffix] == shorter[N - 2 - suffix]:
+      suffix += 1
+    combos = [(c,) for c in range(max(1, N - 1 - suffix), min(prefix, N - 2) + 1)]
+  else:
+    # runs[s][x]: consecutive positions from x where longer[y + s] == shorter[y].
+    runs = []
+    for s in range(n + 1):
+      run = [0] * (N + 1)
+      for x in range(len(shorter) - 1, -1, -1):
+        if x + s < N and longer[x + s] == shorter[x]:
+          run[x] = run[x + 1] + 1
+      runs.append(run)
 
-  combos = []
+    combos = []
 
-  def place(t, start, combo):
-    if t == n:
-      if runs[n][start - n] >= N - start:
-        combos.append(combo)
-      return
-    for c in range(max(start, 1), N - 1):   # never an end residue: the terminal rule
-      if c - start > runs[t][start - t]:
-        break
-      place(t + 1, c + 1, combo + (c,))
+    def place(t, start, combo):
+      if t == n:
+        if runs[n][start - n] >= N - start:
+          combos.append(combo)
+        return
+      for c in range(max(start, 1), N - 1):   # never an end residue: the terminal rule
+        if c - start > runs[t][start - t]:
+          break
+        place(t + 1, c + 1, combo + (c,))
 
-  place(0, 0, ())
+    place(0, 0, ())
   if M < L:
     return [tuple((i + 1, query[i]) for i in combo) for combo in combos]
   return [tuple((k - u + 1, matched[k]) for u, k in enumerate(combo)) for combo in combos]
@@ -309,8 +320,12 @@ class Matcher:
     Queries too short for k=3 run against a 2-mer table on their own rather than
     dragging the whole batch down to k=2, where 2-mer seeds explode. Every group still
     runs at k <= its own pigeonhole optimum, so the match set equals a single-k run.
-    Groups are merged as columns, not frames, so an all-miss group's null column cannot
-    clash with another group's String column."""
+    Each group's hits are labeled from the index that found them: protein numbers are
+    that index's own FASTA ordinals, so labeling them from another group's index would
+    name the wrong protein whenever the two were built from different versions of the
+    proteome. vertical_relaxed lets an all-miss group's null column stack under another
+    group's String column, and the text columns are cast to String at the end so a batch
+    that hits nothing has the same schema as one that does."""
     n = self.max_indels
     short = [(q, s) for q, s in self.query if len(s) // (n + 1) < 3]
     rest = [(q, s) for q, s in self.query if len(s) // (n + 1) >= 3]
@@ -322,8 +337,7 @@ class Matcher:
       rest_optimal = max(2, min(len(s) for _, s in rest) // (n + 1))
       groups.setdefault(self._clamp_k(rest_optimal), []).extend(rest)
 
-    combined = [[] for _ in range(8)]
-    metadata_path = None
+    frames = []
     for k, queries in sorted(groups.items()):
       self._recall_warning(k, n, queries)
       pepidx_path = self._pepidx_path(k)
@@ -333,10 +347,10 @@ class Matcher:
         rs_preprocess(self.proteome_file, k, pepidx_path)
       print(f"Searching {len(queries)} peptides against {self.proteome_name} "
             f"(k={k}, max_indels={n})...")
-      for i, column in enumerate(rs_indel_match(pepidx_path, queries, n)):
-        combined[i].extend(column)
-      metadata_path = pepidx_path
-    return self._to_dataframe(combined, metadata_path, is_indels=True)
+      results = rs_indel_match(pepidx_path, queries, n)
+      frames.append(self._to_dataframe(results, pepidx_path, is_indels=True))
+    df = pl.concat(frames, how='vertical_relaxed')
+    return df.with_columns(pl.col('Matched Sequence', 'Indel Positions').cast(pl.Utf8))
 
   def _clamp_k(self, optimal):
     """Resolve k for one query group: an explicit k is honored up to `optimal`, above
@@ -524,19 +538,28 @@ class Matcher:
 
     return pl.concat([matched_df, unmatched_df], how="vertical_relaxed")
 
-  def _metadata_table(self, pepidx_path: str) -> pl.DataFrame:
-    """Per-protein metadata read from `pepidx_path`, the index the search just used.
-    Protein numbers are that index's own FASTA ordinals, so any other file -- including
-    one whose name merely shares this proteome's prefix -- would misattribute every hit."""
-    pnum, pid, name, species, taxon, gene, exist, seqver, geneprio, swiss = rs_metadata(pepidx_path)
+  def _metadata_table(self, pepidx_path: str, protein_nums=None) -> pl.DataFrame:
+    """Metadata for `protein_nums` (every protein when None), read from `pepidx_path`, the
+    index the search just used. Protein numbers are that index's own FASTA ordinals, so any
+    other file -- including one whose name merely shares this proteome's prefix -- would
+    misattribute every hit. Searches pass only the proteins they hit: building the whole
+    proteome's table (82k rows for human) cost more than the search itself on small queries.
+    A hit on a protein this index lacks means the search's indexes disagree, which raises."""
+    try:
+      pnum, pid, name, species, taxon, gene, exist, seqver, geneprio, swiss = rs_metadata(pepidx_path, protein_nums)
+    except ValueError as e:   # .pepidx files are reused by name, so a FASTA edited in place leaves stale ones
+      raise ValueError(
+        f"{e}. This proteome's .pepidx files in {self.preprocessed_files_path} were most likely built "
+        f"from different versions of {self.proteome_file}; delete them to rebuild."
+      ) from e
+    str_cols = ['Protein ID','Protein Name','Species','Taxon ID','Gene',
+                'Protein Existence Level','Sequence Version','Gene Priority','SwissProt Reviewed']
     m = pl.DataFrame({
       'protein_num': pl.Series(pnum, dtype=pl.UInt32),
       'Protein ID': pid, 'Protein Name': name, 'Species': species, 'Taxon ID': taxon,
       'Gene': gene, 'Protein Existence Level': exist, 'Sequence Version': seqver,
       'Gene Priority': geneprio, 'SwissProt Reviewed': swiss,
-    })
-    str_cols = ['Protein ID','Protein Name','Species','Taxon ID','Gene',
-                'Protein Existence Level','Sequence Version','Gene Priority','SwissProt Reviewed']
+    }, schema_overrides={c: pl.Utf8 for c in str_cols})   # String even when nothing was hit
     m = m.with_columns(
       pl.when(pl.col(c) == '').then(None).otherwise(pl.col(c)).alias(c) for c in str_cols
     )
@@ -561,7 +584,8 @@ class Matcher:
 
   def _to_dataframe(self, cols, pepidx_path, is_indels=False):
     """Build the results frame from the columnar Rust output, joining protein metadata
-    from `pepidx_path` once instead of cloning it into every hit row. rs_indel_match
+    from `pepidx_path` once instead of cloning it into every hit row. Only the proteins
+    the search hit are read, and the join keeps the hits' row order. rs_indel_match
     reuses the mismatch slot for its edit count, so only the column name differs by
     mode; indel positions are derived here from (query, matched) rather than in Rust,
     once per distinct pair since a matched peptide often recurs across proteins, and
@@ -600,7 +624,9 @@ class Matcher:
       'Index end': pl.Series(iend, dtype=pl.Int64),
     })
 
-    df = base.join(self._metadata_table(pepidx_path), on='protein_num', how='left').drop('protein_num')
+    hit_proteins = base.get_column('protein_num').drop_nulls().unique().to_list()
+    metadata = self._metadata_table(pepidx_path, hit_proteins)
+    df = base.join(metadata, on='protein_num', how='left', maintain_order='left').drop('protein_num')
 
     if self.sequence_version:
       df = df.with_columns(
