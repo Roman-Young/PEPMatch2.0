@@ -37,6 +37,8 @@ RESULTS="${RESULTS:-$OUT}"
 echo "=== per-length timing ==="
 echo "job        : ${SLURM_JOB_ID:-manual}"
 echo "host       : $(hostname)"
+echo "cpu        : $(lscpu | sed -n 's/^Model name: *//p')   ($(nproc) cpus visible)"
+echo "repeats    : $REPEATS"
 echo "started    : $(date -Is)"
 
 source "$HOME/projects/pepmatch/env.sh"
