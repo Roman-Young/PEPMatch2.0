@@ -17,9 +17,8 @@
 #             up to 54 h and its scan cost barely varies)
 # ~1.5 h, nearly all of it BLAST.
 #
-# Indexes and databases go on the node's local disk when it has room. On the network
-# scratch, the first read of a freshly built index or database is slow, and that measures
-# the file system rather than the tool.
+# Indexes and databases go on the network scratch (WekaFS), as in every other paper run;
+# every tool reads its freshly built index or database from the same file system.
 #   bash: sbatch benchmarking/slurm/run-repeat-timing.sbatch
 
 set -euo pipefail
@@ -31,7 +30,7 @@ ALIGNERS='PEPMatch,blast (short),blast (default),diamond,mmseqs2'
 
 echo "=== repeated timing, all tools ($REPEATS x build+search) ==="
 echo "job        : ${SLURM_JOB_ID:-manual}   host: $(hostname)   started: $(date -Is)"
-echo "cpu        : $(lscpu | sed -n 's/^Model name: *//p')   ($(nproc) cpus visible)"
+echo "cpu        : $(lscpu | sed -n 's/^Model name: *//p')   (${SLURM_CPUS_ON_NODE:-?} cpus allocated)"
 echo "ram        : $(free -g | awk '/^Mem:/ {print $2 " GB"}')"
 echo "commit     : $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
 source "$HOME/projects/pepmatch/env.sh"
@@ -58,17 +57,7 @@ assert 'impl Walk' in src.read_text(), 'match.rs lacks the single-walk indel ext
 print(f'engine     : {so.name} {hashlib.sha256(so.read_bytes()).hexdigest()[:12]}  OK')
 EOF
 
-# Local disk if it has 40 GB free (MMseqs2's index over the human proteome runs to several
-# GB), else the network scratch. Either way the choice is printed, for the Methods.
-LOCAL_BASE="${TMPDIR:-/tmp}"
-if [[ -d "$LOCAL_BASE" && -w "$LOCAL_BASE" ]] && (( $(df -Pk "$LOCAL_BASE" | awk 'NR==2 {print $4}') > 40 * 1024 * 1024 )); then
-  WORK="$LOCAL_BASE/pepmatch-repeat-${SLURM_JOB_ID:-manual}"
-  trap 'rm -rf "$WORK"' EXIT
-else
-  WORK="/mnt/hpcscratch/ryoung/pepmatch-repeat-${SLURM_JOB_ID:-manual}"
-  echo "!! WARNING: no local disk with 40 GB free; using network scratch. First reads of each"
-  echo "!!          fresh index/database will include network file-system time for every tool."
-fi
+WORK="/mnt/hpcscratch/ryoung/pepmatch-repeat-${SLURM_JOB_ID:-manual}"
 mkdir -p "$WORK/proteomes" "$WORK/work" "$OUT"
 echo "workdir    : $WORK"
 df -hT "$WORK" | tail -1 | awk '{print "filesystem : " $2 " on " $1 ", " $5 " free"}'

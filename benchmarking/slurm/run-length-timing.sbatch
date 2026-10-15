@@ -37,7 +37,7 @@ RESULTS="${RESULTS:-$OUT}"
 echo "=== per-length timing ==="
 echo "job        : ${SLURM_JOB_ID:-manual}"
 echo "host       : $(hostname)"
-echo "cpu        : $(lscpu | sed -n 's/^Model name: *//p')   ($(nproc) cpus visible)"
+echo "cpu        : $(lscpu | sed -n 's/^Model name: *//p')   (${SLURM_CPUS_ON_NODE:-?} cpus allocated)"
 echo "repeats    : $REPEATS"
 echo "started    : $(date -Is)"
 
