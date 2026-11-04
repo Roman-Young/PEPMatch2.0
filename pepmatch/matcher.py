@@ -1,14 +1,24 @@
 import os
+import tempfile
 import polars as pl
 from pathlib import Path
 from Bio import SeqIO
-from ._rs import rs_preprocess, rs_match, rs_discontinuous, rs_metadata, rs_match_counts, rs_indel_match
+from ._rs import rs_preprocess, rs_match, rs_discontinuous, rs_metadata, rs_match_counts, rs_indel_match, rs_short_proteins
 
 VALID_OUTPUT_FORMATS = ['dataframe', 'polars', 'pandas', 'csv', 'tsv', 'xlsx', 'json']
 DATAFRAME_OUTPUT_FORMATS = frozenset({'dataframe', 'polars', 'pandas'})
 FASTA_EXTENSIONS = {
   '.fasta', '.fas', '.fa', '.fna', '.ffn', '.faa', '.mpfa', '.frn'
 }
+
+# Shortest proteome entry the short-target search looks for inside the queries: a 1-residue
+# entry cannot hold even one 2-mer seed. A placeholder until the floor is settled with the PI.
+MIN_TARGET_LEN = 2
+# preprocess.rs packs each k-mer into a u128, one byte per residue.
+MAX_INDEX_K = 16
+# Short targets per reversed search call: Rust returns a record per target, hit or miss, so a
+# database of a million epitopes would otherwise hold a million miss records at once.
+SHORT_TARGET_CHUNK = 100_000
 
 def output_matches(df: pl.DataFrame, output_format: str, output_name: str) -> None:
   """Write the results to disk in `output_format`, appending the extension if absent."""
@@ -137,14 +147,17 @@ def _indel_edits(query, matched):
   return entries
 
 
-def format_indel_positions(query, matched):
+def format_indel_positions(query, matched, offset=0):
   """Render the Indel Positions column, e.g. 'd: A[6]', 'd: AA[2,4]', 'd: C[3], d: E[5]',
-  or '[]' for an exact match. A 1-based range collapses when the placement is unambiguous."""
+  or '[]' for an exact match. A 1-based range collapses when the placement is unambiguous.
+  `offset` shifts every position, for when `query` is a window starting `offset` residues
+  into the full query."""
   edits = _indel_edits(query, matched)
   if not edits:
     return '[]'
   return ', '.join(
-    f'{kind}: {residues}[{low}]' if low == high else f'{kind}: {residues}[{low},{high}]'
+    f'{kind}: {residues}[{low + offset}]' if low == high
+    else f'{kind}: {residues}[{low + offset},{high + offset}]'
     for kind, residues, low, high in edits
   )
 
@@ -166,6 +179,7 @@ class Matcher:
     output_name='',
     sequence_version=True,
     counts_only=False,
+    short_targets=False,
   ):
 
     if k == 0:
@@ -200,6 +214,12 @@ class Matcher:
     if counts_only and best_match:
       raise ValueError('counts_only is not supported with best_match.')
 
+    if short_targets and best_match:
+      raise ValueError('short_targets and best_match are not yet supported together.')
+
+    if short_targets and counts_only:
+      raise ValueError('short_targets and counts_only are not yet supported together.')
+
     self.proteome_file = str(proteome_file)
     self.proteome_name = Path(proteome_file).stem
     self.max_mismatches = max_mismatches
@@ -208,6 +228,7 @@ class Matcher:
     self.output_format = output_format
     self.sequence_version = sequence_version
     self.counts_only = counts_only
+    self.short_targets = short_targets
     self.output_name = output_name or 'PEPMatch_results'
 
     self.query = self._parse_query(query)
@@ -217,6 +238,13 @@ class Matcher:
     self.query = self._clean_query()
     if not self.query and not self.discontinuous_epitopes:
       raise ValueError('Query is empty.')
+
+    # The short-target search indexes the queries through a FASTA file, whose reader trims
+    # each line, so a space or line break in a list query would shift every Query start/end.
+    if short_targets:
+      for qid, seq in self.query:
+        if any(c.isspace() for c in seq):
+          raise ValueError(f'Query {qid} contains whitespace, which short_targets cannot place; remove it.')
 
     if self.k_specified and self.query:
       shortest = min(len(seq) for _, seq in self.query)
@@ -285,6 +313,7 @@ class Matcher:
     if self.query:
       if self.max_indels > 0:
         linear_df = self.indel_search()
+        pepidx_path = self._indel_pepidx_path
       elif self.best_match and self.k_specified:
         results, pepidx_path = self._search(self.k, self.max_mismatches)
         linear_df = self._best_match_filter(self._to_dataframe(results, pepidx_path))
@@ -296,6 +325,9 @@ class Matcher:
         results, pepidx_path = self._search(k, self.max_mismatches)
         linear_df = self._to_dataframe(results, pepidx_path)
 
+      if self.short_targets:   # best_match is rejected in __init__, so pepidx_path is set
+        linear_df = self._merge_short_targets(linear_df, self._short_target_search(pepidx_path))
+
     if self.discontinuous_epitopes:
       pepidx_path = self._pepidx_path(2)
       if not os.path.isfile(pepidx_path):
@@ -305,6 +337,11 @@ class Matcher:
       ]
       results = rs_discontinuous(pepidx_path, epitopes, self.max_mismatches)
       discontinuous_df = self._to_dataframe(results, pepidx_path)
+      if self.short_targets:   # a position list has no query span; null keeps the concat aligned
+        discontinuous_df = discontinuous_df.with_columns(
+          pl.lit(None, dtype=pl.Int64).alias('Query start'),
+          pl.lit(None, dtype=pl.Int64).alias('Query end'),
+        ).select(self._span_columns(self._final_columns(False)))
 
     dfs = [d for d in [linear_df, discontinuous_df] if d.height > 0]
     df = pl.concat(dfs, how="vertical_relaxed") if dfs else linear_df
@@ -349,6 +386,9 @@ class Matcher:
             f"(k={k}, max_indels={n})...")
       results = rs_indel_match(pepidx_path, queries, n)
       frames.append(self._to_dataframe(results, pepidx_path, is_indels=True))
+    # Any group's index serves the short-target search: target sequences and protein numbers
+    # are the same at every k.
+    self._indel_pepidx_path = pepidx_path
     df = pl.concat(frames, how='vertical_relaxed')
     return df.with_columns(pl.col('Matched Sequence', 'Indel Positions').cast(pl.Utf8))
 
@@ -362,15 +402,16 @@ class Matcher:
       return optimal
     return self.k if self.k_specified else optimal
 
-  def _recall_warning(self, k, edits, queries=None):
+  def _recall_warning(self, k, edits, queries=None, what='query peptides'):
     """Warn where k cannot guarantee complete recall. The seed guarantee needs
     len >= k * (edits + 1), so a shorter peptide may have a real match that every seed
-    misses. Shared by the mismatch and indel paths, the latter passing its own group."""
+    misses. Shared by the mismatch and indel paths, the latter passing its own group, and by
+    the short-target search, whose searched peptides are proteome entries."""
     queries = self.query if queries is None else queries
     unguaranteed = sorted({len(s) for _, s in queries if len(s) < k * (edits + 1)})
     if unguaranteed:
-      print(f"k={k}, edits={edits}: complete recall is not guaranteed for query "
-            f"peptides shorter than {k * (edits + 1)} residues (lengths: {unguaranteed}); "
+      print(f"k={k}, edits={edits}: complete recall is not guaranteed for {what} "
+            f"shorter than {k * (edits + 1)} residues (lengths: {unguaranteed}); "
             f"a match may exist but be missed.")
 
   def _auto_k(self, edits):
@@ -396,6 +437,134 @@ class Matcher:
     query = peptides or self.query
     print(f"Searching {len(query)} peptides against {self.proteome_name} (k={k}, max_mismatches={max_mismatches})...")
     return rs_match(pepidx_path, query, k, max_mismatches), pepidx_path
+
+  def _short_target_search(self, pepidx_path):
+    """Hits where a proteome entry shorter than the query lies inside it, within the same
+    edit budget. The forward search lays the whole query on a protein, so an entry shorter
+    than the query never fits and is missed. Here the roles swap: the queries become a small
+    index and each short entry is searched against it with the same engine. The hits are
+    then reported from the query's side: Matched Sequence is the whole entry, Index start/end
+    span all of it, Query start/end say where it landed in the query, and edit positions are
+    numbered along the query. Returns None when nothing was found."""
+    is_indels = self.max_indels > 0
+    edits = self.max_indels if is_indels else self.max_mismatches
+    longest = max(len(seq) for _, seq in self.query)
+    target_nums, targets = rs_short_proteins(pepidx_path, MIN_TARGET_LEN, longest)
+    if not target_nums:
+      return None
+    entries = [(str(num), seq) for num, seq in zip(target_nums, targets)]
+
+    # k is chosen the way the forward search chooses it, with the entries in the queries'
+    # place: one k from the shortest entry, as _auto_k does, or for indels indel_search's
+    # split, where entries too short for k=3 get their own 2-mer index. Unlike there it is
+    # capped at MAX_INDEX_K, since entries run up to the longest query's length.
+    def k_for(peptides):
+      return min(MAX_INDEX_K, max(2, min(len(s) for _, s in peptides) // (edits + 1)))
+    if is_indels:
+      short = [e for e in entries if len(e[1]) // (edits + 1) < 3]
+      rest = [e for e in entries if len(e[1]) // (edits + 1) >= 3]
+      groups = {}
+      if short:
+        groups.setdefault(2, []).extend(short)
+      if rest:
+        groups.setdefault(k_for(rest), []).extend(rest)
+    else:
+      groups = {k_for(entries): entries}
+
+    hits = []
+    with tempfile.TemporaryDirectory() as tmp:
+      queries_fasta = os.path.join(tmp, 'queries.fasta')
+      with open(queries_fasta, 'w') as f:
+        for i, (_, seq) in enumerate(self.query):   # protein number i + 1 is query i
+          f.write(f'>{i + 1}\n{seq}\n')
+
+      print(f"Searching {len(target_nums)} entries of {self.proteome_name} shorter than the "
+            f"longest query inside the queries ({'max_indels' if is_indels else 'max_mismatches'}={edits})...")
+      for k, peptides in sorted(groups.items()):
+        self._recall_warning(k, edits, peptides, 'proteome entries')
+        queries_index = os.path.join(tmp, f'queries_{k}mers.pepidx')
+        rs_preprocess(queries_fasta, k, queries_index)
+        for start in range(0, len(peptides), SHORT_TARGET_CHUNK):
+          chunk = peptides[start:start + SHORT_TARGET_CHUNK]
+          if is_indels:
+            cols = rs_indel_match(queries_index, chunk, edits)
+          else:
+            cols = rs_match(queries_index, chunk, k, edits)
+          target_id, target_seq, window, query_num, n_edits, _, q_start, q_end = cols
+          for t_id, t_seq, win, q_num, n, qs, qe in zip(target_id, target_seq, window, query_num, n_edits, q_start, q_end):
+            if win is None:
+              continue
+            query_id, query_seq = self.query[q_num - 1]
+            # An entry as long as the query is the forward search's to find.
+            if len(t_seq) < len(query_seq):
+              hits.append((q_num, int(t_id), qs, qe, query_id, query_seq, t_seq, win, n))
+
+    if not hits:
+      return None
+    hits.sort(key=lambda h: h[:4])   # query order, then protein, then where in the query
+
+    labels = {}
+    positions = []
+    for _, _, qs, _, _, _, t_seq, win, _ in hits:
+      if is_indels:
+        # Labelled on the query window the entry aligned to, so an ambiguous repeat range
+        # stays inside that window, then shifted to count from the query's first residue.
+        key = (win, t_seq, qs)
+        if key not in labels:
+          labels[key] = format_indel_positions(win, t_seq, qs - 1)
+        positions.append(labels[key])
+      else:
+        positions.append('[' + ', '.join(str(qs + i) for i, (a, b) in enumerate(zip(win, t_seq)) if a != b) + ']')
+
+    # Through _to_dataframe for the metadata join and Protein ID versioning, with the
+    # positions already computed: is_indels=False takes them as given, and the two columns
+    # are renamed back for an indel search.
+    cols = (
+      [h[4] for h in hits], [h[5] for h in hits], [h[6] for h in hits], [h[1] for h in hits],
+      [h[8] for h in hits], positions, [1] * len(hits), [len(h[6]) for h in hits],
+    )
+    df = self._to_dataframe(cols, pepidx_path)
+    if is_indels:
+      df = df.rename({'Mismatches': 'Indels', 'Mutated Positions': 'Indel Positions'})
+    return df.with_columns(
+      pl.Series('Query start', [h[2] for h in hits], dtype=pl.Int64),
+      pl.Series('Query end', [h[3] for h in hits], dtype=pl.Int64),
+    ).select(self._span_columns(self._final_columns(is_indels)))
+
+  def _merge_short_targets(self, forward, short):
+    """Add the short-target hits to the forward results without changing any forward row.
+    Forward hits span the whole query. A short-target hit the forward search already
+    reported -- an entry shorter than the query only by the indels it absorbs -- is kept
+    in its forward row. A query's miss row goes once it has a short-target hit."""
+    is_indels = self.max_indels > 0
+    columns = self._span_columns(self._final_columns(is_indels))
+    hit = pl.col('Matched Sequence').is_not_null()
+    forward = forward.with_columns(
+      pl.when(hit).then(pl.lit(1, dtype=pl.Int64)).alias('Query start'),
+      pl.when(hit).then(pl.col('Query Sequence').str.len_chars().cast(pl.Int64)).alias('Query end'),
+    ).select(columns)
+    if short is None:
+      return forward
+
+    # The query span is part of the key: an entry can sit at several places in one query,
+    # and only the placement covering the whole query is the forward row's alignment.
+    key = ['Query ID', 'Query Sequence', 'Protein ID', 'Matched Sequence',
+           'Index start', 'Index end', 'Query start', 'Query end']
+    # A forward search that hit nothing leaves its text columns typed Null, which cannot be
+    # joined against strings.
+    forward_keys = forward.filter(hit).select(key).cast(dict(short.select(key).schema))
+    short = short.join(forward_keys, on=key, how='anti', maintain_order='left')
+
+    gained = short.select('Query ID', 'Query Sequence').unique()
+    forward = forward.with_row_index('_row')
+    resolved = forward.filter(~hit).join(gained, on=['Query ID', 'Query Sequence'], how='semi').get_column('_row')
+    forward = forward.filter(~pl.col('_row').is_in(resolved.implode())).drop('_row')
+    return pl.concat([forward, short], how='vertical_relaxed')
+
+  def _span_columns(self, columns):
+    """`columns` with Query start / Query end placed after Index end."""
+    i = columns.index('Index end') + 1
+    return columns[:i] + ['Query start', 'Query end'] + columns[i:]
 
   def _search_counts(self, k, max_mismatches):
     """Count hits per (peptide, mismatch level) at k, building the index if absent."""
