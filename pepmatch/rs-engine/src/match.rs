@@ -881,6 +881,29 @@ pub(crate) fn run_metadata(pepidx_path: &str, protein_nums: Option<Vec<u32>>) ->
     metadata_columns(&index, protein_nums)
 }
 
+/// Every protein with `min_len <= length < max_len`, as (protein numbers, sequences). Lengths
+/// come from the offsets table, which stores every protein including those shorter than k, so
+/// the answer is the same whichever k the index was built at and no k-mers are read.
+pub(crate) fn run_short_proteins(pepidx_path: &str, min_len: usize, max_len: usize) -> (Vec<u32>, Vec<String>) {
+    let index = PepIndex::open(pepidx_path);
+    let mut nums = Vec::new();
+    let mut seqs = Vec::new();
+    for prot_num in 1..=index.num_proteins {
+        let base = index.protein_offset(prot_num) as usize;
+        let end = if prot_num < index.num_proteins {
+            index.protein_offset(prot_num + 1) as usize
+        } else {
+            index.seq_len
+        };
+        let len = end - base;
+        if len >= min_len && len < max_len {
+            nums.push(prot_num as u32);
+            seqs.push(String::from_utf8_lossy(&index.mmap[index.seq_offset + base..index.seq_offset + end]).into_owned());
+        }
+    }
+    (nums, seqs)
+}
+
 pub(crate) fn run(pepidx_path: &str, peptides: Vec<(String, String)>, k: usize, max_mismatches: usize) -> Columns {
     let index = PepIndex::open(pepidx_path);
     let records: Vec<HitRecord> = peptides

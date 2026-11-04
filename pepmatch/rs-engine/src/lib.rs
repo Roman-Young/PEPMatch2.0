@@ -37,6 +37,12 @@ fn rs_metadata(pepidx_path: &str, protein_nums: Option<Vec<u32>>) -> PyResult<ma
     matching::run_metadata(pepidx_path, protein_nums).map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
+/// Proteins with `min_len <= length < max_len` in this index, as (protein numbers, sequences).
+#[pyfunction]
+fn rs_short_proteins(pepidx_path: &str, min_len: usize, max_len: usize) -> (Vec<u32>, Vec<String>) {
+    matching::run_short_proteins(pepidx_path, min_len, max_len)
+}
+
 #[pyfunction]
 fn rs_match_counts(pepidx_path: &str, peptides: Vec<(String, String)>, k: usize, max_mismatches: usize) -> matching::CountColumns {
     matching::run_counts(pepidx_path, peptides, k, max_mismatches)
@@ -54,6 +60,7 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rs_match, m)?)?;
     m.add_function(wrap_pyfunction!(rs_discontinuous, m)?)?;
     m.add_function(wrap_pyfunction!(rs_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(rs_short_proteins, m)?)?;
     m.add_function(wrap_pyfunction!(rs_match_counts, m)?)?;
     m.add_function(wrap_pyfunction!(rs_indel_match, m)?)?;
     Ok(())
