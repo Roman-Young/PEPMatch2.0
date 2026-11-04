@@ -323,3 +323,20 @@ def test_forward_rows_are_unchanged(tmp_path, kwargs):
   # The added rows are sorted, so they come out identically on every run.
   again = search(tmp_path, INVARIANT_ENTRIES, query=INVARIANT_QUERIES, **kwargs).filter(hit)
   plt.assert_frame_equal(again.slice(off_hits.height), added)
+
+
+@pytest.mark.parametrize('flag, rows', [([], [(None, None)]), (['--short_targets'], [(3, 12)])])
+def test_cli_switch_is_off_unless_given(tmp_path, monkeypatch, flag, rows):
+  from pepmatch.shell import run_matcher
+  fasta = write_entries(tmp_path / 'db.fasta', {'T': QUERY[2:12]})
+  queries = tmp_path / 'queries.txt'
+  queries.write_text(QUERY + '\n')
+  out = tmp_path / 'cli'
+  monkeypatch.setattr('sys.argv', ['pepmatch-match', '-q', str(queries), '-p', str(fasta),
+                                   '-P', str(tmp_path), '-o', str(out), *flag])
+  run_matcher()
+  df = pl.read_csv(f'{out}.csv')
+  if flag:
+    assert df.select('Query start', 'Query end').rows() == rows
+  else:
+    assert 'Query start' not in df.columns and df.height == 1 and df['Matched Sequence'][0] is None

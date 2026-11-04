@@ -28,6 +28,7 @@ def run_matcher():
   parser.add_argument('-f', '--output_format', default='csv')
   parser.add_argument('-o', '--output_name', default='')
   parser.add_argument('-v', '--sequence_version', action='store_false', default=True)
+  parser.add_argument('-s', '--short_targets', action='store_true', default=False)
   args = parser.parse_args()
 
   Matcher(
@@ -41,4 +42,5 @@ def run_matcher():
     output_format=args.output_format,
     output_name=args.output_name,
     sequence_version=args.sequence_version,
+    short_targets=args.short_targets,
   ).match()
