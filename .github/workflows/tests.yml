@@ -40,6 +40,10 @@ jobs:
             test-file: pepmatch/tests/test_metadata_rows.py
           - name: Indel Golden Output
             test-file: pepmatch/tests/test_indel_golden.py
+          - name: Short Targets
+            test-file: pepmatch/tests/test_short_targets.py
+          - name: Short Targets Property
+            test-file: pepmatch/tests/test_short_targets_property.py
 
     steps:
     - name: Checkout Code
