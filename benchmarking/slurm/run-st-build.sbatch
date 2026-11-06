@@ -19,10 +19,13 @@ source "$HOME/projects/pepmatch/env.sh"
 echo "=== engine build for short-target timing ==="
 echo "host   : $(hostname)"
 echo "branch : $(git rev-parse --abbrev-ref HEAD)  ($(git rev-parse --short HEAD))"
-git diff --quiet -- pepmatch/ || { echo "FATAL: uncommitted changes under pepmatch/; the timed engine must be a commit." >&2; exit 1; }
+# maturin rewrites the version line in Cargo.lock on every build, so the lock is not engine
+# source: it is ignored here and restored after the build, keeping the tree clean for the next run.
+git diff --quiet -- pepmatch/ ':(exclude)pepmatch/rs-engine/Cargo.lock' || { echo "FATAL: uncommitted changes under pepmatch/; the timed engine must be a commit." >&2; exit 1; }
 grep -q 'fn rs_short_proteins' pepmatch/rs-engine/src/lib.rs || { echo "FATAL: no rs_short_proteins in lib.rs; wrong branch." >&2; exit 1; }
 
 maturin develop --release || { echo "FATAL: engine build failed" >&2; exit 1; }
+git checkout -- pepmatch/rs-engine/Cargo.lock
 SO=$(python3 -c 'from pepmatch import _rs; print(_rs.__file__)')
 python3 -c 'import polars; print("polars", polars.__version__)'
 sha256sum "$SO" | awk '{print $1}' > "$RUN_DIR/engine-sha256.txt"
