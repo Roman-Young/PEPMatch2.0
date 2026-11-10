@@ -44,6 +44,8 @@ jobs:
             test-file: pepmatch/tests/test_short_targets.py
           - name: Short Targets Property
             test-file: pepmatch/tests/test_short_targets_property.py
+          - name: Short Target Fused Search
+            test-file: pepmatch/tests/test_short_target_fused.py
 
     steps:
     - name: Checkout Code

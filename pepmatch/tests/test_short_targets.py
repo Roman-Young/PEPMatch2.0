@@ -5,7 +5,7 @@ import polars.testing as plt
 from pathlib import Path
 
 from pepmatch import Matcher, Preprocessor
-from pepmatch._rs import rs_metadata, rs_short_proteins
+from pepmatch._rs import rs_metadata, rs_short_lengths, rs_short_proteins
 
 # Lengths 18, 5, 2, 0, 10. The fourth record has no sequence line, so it is stored as an
 # empty protein; it must still take protein number 4 so the fifth keeps number 5.
@@ -58,6 +58,16 @@ def test_short_proteins_include_proteins_shorter_than_k(short_proteome):
 
 def test_short_proteins_do_not_depend_on_k(short_proteome):
   assert rs_short_proteins(index_at(short_proteome, 2), 0, 100) == rs_short_proteins(index_at(short_proteome, 8), 0, 100)
+
+
+def test_short_lengths_count_the_proteins_short_proteins_returns(short_proteome):
+  # The histogram the search picks k and warns from, without reading the sequences.
+  index = index_at(short_proteome, 8)
+  assert rs_short_lengths(index, 0, 100) == [(0, 1), (2, 1), (5, 1), (10, 1), (18, 1)]
+  assert rs_short_lengths(index, 5, 10) == [(5, 1)]
+  assert rs_short_lengths(index, 5, 11) == [(5, 1), (10, 1)]
+  assert rs_short_lengths(index, 11, 11) == []
+  assert rs_short_lengths(index_at(short_proteome, 2), 0, 100) == rs_short_lengths(index, 0, 100)
 
 
 # ── The short-target search: proteome entries shorter than the query that lie inside it. ──
