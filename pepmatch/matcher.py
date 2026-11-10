@@ -3,7 +3,7 @@ import tempfile
 import polars as pl
 from pathlib import Path
 from Bio import SeqIO
-from ._rs import rs_preprocess, rs_match, rs_discontinuous, rs_metadata, rs_match_counts, rs_indel_match, rs_short_proteins
+from ._rs import rs_preprocess, rs_match, rs_discontinuous, rs_metadata, rs_match_counts, rs_indel_match, rs_short_lengths, rs_short_target_match
 
 VALID_OUTPUT_FORMATS = ['dataframe', 'polars', 'pandas', 'csv', 'tsv', 'xlsx', 'json']
 DATAFRAME_OUTPUT_FORMATS = frozenset({'dataframe', 'polars', 'pandas'})
@@ -16,9 +16,6 @@ FASTA_EXTENSIONS = {
 MIN_TARGET_LEN = 2
 # preprocess.rs packs each k-mer into a u128, one byte per residue.
 MAX_INDEX_K = 16
-# Short targets per reversed search call: Rust returns a record per target, hit or miss, so a
-# database of a million epitopes would otherwise hold a million miss records at once.
-SHORT_TARGET_CHUNK = 100_000
 
 def output_matches(df: pl.DataFrame, output_format: str, output_name: str) -> None:
   """Write the results to disk in `output_format`, appending the extension if absent."""
@@ -402,13 +399,15 @@ class Matcher:
       return optimal
     return self.k if self.k_specified else optimal
 
-  def _recall_warning(self, k, edits, queries=None, what='query peptides'):
+  def _recall_warning(self, k, edits, queries=None, what='query peptides', lengths=None):
     """Warn where k cannot guarantee complete recall. The seed guarantee needs
     len >= k * (edits + 1), so a shorter peptide may have a real match that every seed
     misses. Shared by the mismatch and indel paths, the latter passing its own group, and by
-    the short-target search, whose searched peptides are proteome entries."""
-    queries = self.query if queries is None else queries
-    unguaranteed = sorted({len(s) for _, s in queries if len(s) < k * (edits + 1)})
+    the short-target search, whose searched peptides are proteome entries it passes as
+    `lengths` only."""
+    if lengths is None:
+      lengths = [len(s) for _, s in (self.query if queries is None else queries)]
+    unguaranteed = sorted({length for length in lengths if length < k * (edits + 1)})
     if unguaranteed:
       print(f"k={k}, edits={edits}: complete recall is not guaranteed for {what} "
             f"shorter than {k * (edits + 1)} residues (lengths: {unguaranteed}); "
@@ -449,27 +448,33 @@ class Matcher:
     is_indels = self.max_indels > 0
     edits = self.max_indels if is_indels else self.max_mismatches
     longest = max(len(seq) for _, seq in self.query)
-    target_nums, targets = rs_short_proteins(pepidx_path, MIN_TARGET_LEN, longest)
-    if not target_nums:
+    # (length, count) of the entries to search. The entries themselves stay in the index:
+    # rs_short_target_match reads them there and hands back only hits, so nothing that scales
+    # with the number of entries crosses into Python.
+    lengths = rs_short_lengths(pepidx_path, MIN_TARGET_LEN, longest)
+    if not lengths:
       return None
-    entries = [(str(num), seq) for num, seq in zip(target_nums, targets)]
+
+    def lengths_in(lo, hi):
+      return [length for length, _ in lengths if lo <= length < hi]
 
     # k is chosen the way the forward search chooses it, with the entries in the queries'
     # place: one k from the shortest entry, as _auto_k does, or for indels indel_search's
-    # split, where entries too short for k=3 get their own 2-mer index. Unlike there it is
-    # capped at MAX_INDEX_K, since entries run up to the longest query's length.
-    def k_for(peptides):
-      return min(MAX_INDEX_K, max(2, min(len(s) for _, s in peptides) // (edits + 1)))
+    # split, where entries too short for k=3 (length // (edits + 1) < 3) get their own 2-mer
+    # index. Unlike there it is capped at MAX_INDEX_K, since entries run up to the longest
+    # query's length. Each group is a length range [lo, hi); an empty one is skipped.
+    def k_for(lo, hi):
+      return min(MAX_INDEX_K, max(2, min(lengths_in(lo, hi)) // (edits + 1)))
     if is_indels:
-      short = [e for e in entries if len(e[1]) // (edits + 1) < 3]
-      rest = [e for e in entries if len(e[1]) // (edits + 1) >= 3]
-      groups = {}
-      if short:
-        groups.setdefault(2, []).extend(short)
-      if rest:
-        groups.setdefault(k_for(rest), []).extend(rest)
+      split = 3 * (edits + 1)
+      short, rest = (MIN_TARGET_LEN, min(split, longest)), (max(MIN_TARGET_LEN, split), longest)
+      groups = []
+      if lengths_in(*short):
+        groups.append((2, *short))
+      if lengths_in(*rest):
+        groups.append((k_for(*rest), *rest))
     else:
-      groups = {k_for(entries): entries}
+      groups = [(k_for(MIN_TARGET_LEN, longest), MIN_TARGET_LEN, longest)]
 
     hits = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -478,26 +483,18 @@ class Matcher:
         for i, (_, seq) in enumerate(self.query):   # protein number i + 1 is query i
           f.write(f'>{i + 1}\n{seq}\n')
 
-      print(f"Searching {len(target_nums)} entries of {self.proteome_name} shorter than the "
+      print(f"Searching {sum(count for _, count in lengths)} entries of {self.proteome_name} shorter than the "
             f"longest query inside the queries ({'max_indels' if is_indels else 'max_mismatches'}={edits})...")
-      for k, peptides in sorted(groups.items()):
-        self._recall_warning(k, edits, peptides, 'proteome entries')
+      for k, lo, hi in groups:
+        self._recall_warning(k, edits, what='proteome entries', lengths=lengths_in(lo, hi))
         queries_index = os.path.join(tmp, f'queries_{k}mers.pepidx')
         rs_preprocess(queries_fasta, k, queries_index)
-        for start in range(0, len(peptides), SHORT_TARGET_CHUNK):
-          chunk = peptides[start:start + SHORT_TARGET_CHUNK]
-          if is_indels:
-            cols = rs_indel_match(queries_index, chunk, edits)
-          else:
-            cols = rs_match(queries_index, chunk, k, edits)
-          target_id, target_seq, window, query_num, n_edits, _, q_start, q_end = cols
-          for t_id, t_seq, win, q_num, n, qs, qe in zip(target_id, target_seq, window, query_num, n_edits, q_start, q_end):
-            if win is None:
-              continue
-            query_id, query_seq = self.query[q_num - 1]
-            # An entry as long as the query is the forward search's to find.
-            if len(t_seq) < len(query_seq):
-              hits.append((q_num, int(t_id), qs, qe, query_id, query_seq, t_seq, win, n))
+        cols = rs_short_target_match(pepidx_path, queries_index, lo, hi, k, edits, is_indels)
+        for t_num, t_seq, win, q_num, n, qs, qe in zip(*cols):
+          query_id, query_seq = self.query[q_num - 1]
+          # An entry as long as the query is the forward search's to find.
+          if len(t_seq) < len(query_seq):
+            hits.append((q_num, t_num, qs, qe, query_id, query_seq, t_seq, win, n))
 
     if not hits:
       return None

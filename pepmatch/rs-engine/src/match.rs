@@ -881,13 +881,12 @@ pub(crate) fn run_metadata(pepidx_path: &str, protein_nums: Option<Vec<u32>>) ->
     metadata_columns(&index, protein_nums)
 }
 
-/// Every protein with `min_len <= length < max_len`, as (protein numbers, sequences). Lengths
-/// come from the offsets table, which stores every protein including those shorter than k, so
-/// the answer is the same whichever k the index was built at and no k-mers are read.
-pub(crate) fn run_short_proteins(pepidx_path: &str, min_len: usize, max_len: usize) -> (Vec<u32>, Vec<String>) {
-    let index = PepIndex::open(pepidx_path);
-    let mut nums = Vec::new();
-    let mut seqs = Vec::new();
+/// (protein number, start, end) within the sequence block for every protein with
+/// `min_len <= length < max_len`, in protein order. Lengths come from the offsets table, which
+/// stores every protein including those shorter than k, so the answer is the same whichever k
+/// the index was built at and no k-mers are read.
+fn short_protein_ranges(index: &PepIndex, min_len: usize, max_len: usize) -> Vec<(u32, usize, usize)> {
+    let mut ranges = Vec::new();
     for prot_num in 1..=index.num_proteins {
         let base = index.protein_offset(prot_num) as usize;
         let end = if prot_num < index.num_proteins {
@@ -897,11 +896,86 @@ pub(crate) fn run_short_proteins(pepidx_path: &str, min_len: usize, max_len: usi
         };
         let len = end - base;
         if len >= min_len && len < max_len {
-            nums.push(prot_num as u32);
-            seqs.push(String::from_utf8_lossy(&index.mmap[index.seq_offset + base..index.seq_offset + end]).into_owned());
+            ranges.push((prot_num as u32, base, end));
         }
     }
-    (nums, seqs)
+    ranges
+}
+
+/// Every protein with `min_len <= length < max_len`, as (protein numbers, sequences).
+pub(crate) fn run_short_proteins(pepidx_path: &str, min_len: usize, max_len: usize) -> (Vec<u32>, Vec<String>) {
+    let index = PepIndex::open(pepidx_path);
+    short_protein_ranges(&index, min_len, max_len)
+        .into_iter()
+        .map(|(num, base, end)| {
+            (num, String::from_utf8_lossy(&index.mmap[index.seq_offset + base..index.seq_offset + end]).into_owned())
+        })
+        .unzip()
+}
+
+/// How many proteins have each length in `min_len <= length < max_len`, as (length, count)
+/// ascending: what the short-target search needs to choose k and warn, without the sequences.
+pub(crate) fn run_short_lengths(pepidx_path: &str, min_len: usize, max_len: usize) -> Vec<(usize, u64)> {
+    let index = PepIndex::open(pepidx_path);
+    let mut counts: std::collections::BTreeMap<usize, u64> = std::collections::BTreeMap::new();
+    for (_, base, end) in short_protein_ranges(&index, min_len, max_len) {
+        *counts.entry(end - base).or_insert(0) += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// Short-target hits: (entry protein number, entry, query window, query number, edits,
+/// window start, window end), coordinates 1-based inclusive within the query.
+pub(crate) type ShortHitColumns = (Vec<u32>, Vec<String>, Vec<String>, Vec<u32>, Vec<i64>, Vec<i64>, Vec<i64>);
+
+/// The reversed half of the short-target search: every protein of `proteome_path` with
+/// `min_len <= length < max_len` is searched, as a peptide, against `queries_path` (an index of
+/// the user's queries) by the same per-peptide search the forward pass runs -- search_peptide at
+/// `k`, or indel_search_peptide at the queries index's k. Only hits are returned: the entries
+/// stay in the mmap and misses never leave Rust, so the cost follows the hits, not the
+/// (possibly million-entry) proteome. Rows come out in protein order.
+pub(crate) fn run_short_target_match(
+    proteome_path: &str,
+    queries_path: &str,
+    min_len: usize,
+    max_len: usize,
+    k: usize,
+    edits: usize,
+    indels: bool,
+) -> ShortHitColumns {
+    let proteome = PepIndex::open(proteome_path);
+    let queries = PepIndex::open(queries_path);
+    let ranges = short_protein_ranges(&proteome, min_len, max_len);
+    let hits: Vec<(u32, HitRecord)> = ranges
+        .par_iter()
+        .flat_map_iter(|&(num, base, end)| {
+            // Same conversion the entries took through rs_short_proteins before this function.
+            let entry = String::from_utf8_lossy(&proteome.mmap[proteome.seq_offset + base..proteome.seq_offset + end]);
+            let records = if indels {
+                indel_search_peptide("", &entry, edits, &queries)
+            } else {
+                search_peptide("", &entry, k, edits, &queries)
+            };
+            records.into_iter().filter(|r| r.matched.is_some()).map(move |r| (num, r))
+        })
+        .collect();
+
+    let n = hits.len();
+    let mut cols: ShortHitColumns = (
+        Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n),
+        Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n),
+    );
+    for (num, r) in hits {
+        // A hit record fills every field; only miss records leave them None.
+        cols.0.push(num);
+        cols.1.push(r.query_seq);
+        cols.2.push(r.matched.expect("hit has a match"));
+        cols.3.push(r.protein_num.expect("hit has a protein"));
+        cols.4.push(r.mismatches.expect("hit has an edit count"));
+        cols.5.push(r.idx_start.expect("hit has a start"));
+        cols.6.push(r.idx_end.expect("hit has an end"));
+    }
+    cols
 }
 
 pub(crate) fn run(pepidx_path: &str, peptides: Vec<(String, String)>, k: usize, max_mismatches: usize) -> Columns {

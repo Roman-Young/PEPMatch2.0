@@ -43,6 +43,21 @@ fn rs_short_proteins(pepidx_path: &str, min_len: usize, max_len: usize) -> (Vec<
     matching::run_short_proteins(pepidx_path, min_len, max_len)
 }
 
+/// (length, count) for proteins with `min_len <= length < max_len` in this index, ascending.
+#[pyfunction]
+fn rs_short_lengths(pepidx_path: &str, min_len: usize, max_len: usize) -> Vec<(usize, u64)> {
+    matching::run_short_lengths(pepidx_path, min_len, max_len)
+}
+
+/// Searches the proteins of `proteome_path` with `min_len <= length < max_len` against the
+/// queries index and returns only the hits (see matching::run_short_target_match).
+#[pyfunction]
+fn rs_short_target_match(
+    proteome_path: &str, queries_path: &str, min_len: usize, max_len: usize, k: usize, edits: usize, indels: bool,
+) -> matching::ShortHitColumns {
+    matching::run_short_target_match(proteome_path, queries_path, min_len, max_len, k, edits, indels)
+}
+
 #[pyfunction]
 fn rs_match_counts(pepidx_path: &str, peptides: Vec<(String, String)>, k: usize, max_mismatches: usize) -> matching::CountColumns {
     matching::run_counts(pepidx_path, peptides, k, max_mismatches)
@@ -61,6 +76,8 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rs_discontinuous, m)?)?;
     m.add_function(wrap_pyfunction!(rs_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(rs_short_proteins, m)?)?;
+    m.add_function(wrap_pyfunction!(rs_short_lengths, m)?)?;
+    m.add_function(wrap_pyfunction!(rs_short_target_match, m)?)?;
     m.add_function(wrap_pyfunction!(rs_match_counts, m)?)?;
     m.add_function(wrap_pyfunction!(rs_indel_match, m)?)?;
     Ok(())
