@@ -203,23 +203,28 @@ def run_child(cfg):
   wrap('rs_preprocess', lambda a: 'qindex' if is_queries_index(a[2]) else 'index_build')
   wrap('rs_match', lambda a: 'rev_search' if is_queries_index(a[0]) else 'forward_engine')
   wrap('rs_indel_match', lambda a: 'rev_search' if is_queries_index(a[0]) else 'forward_engine')
-  real_short = wrap('rs_short_proteins', lambda a: 'pick')
-  wrapped_short = M.rs_short_proteins
+  # The reversed pass: a length histogram to choose k ('pick'), then one Rust call per length
+  # group that reads the entries from the index and returns only hits ('rev_search').
+  real_lengths = wrap('rs_short_lengths', lambda a: 'pick')
+  wrap('rs_short_target_match', lambda a: 'rev_search')
+  wrapped_lengths, wrapped_fused = M.rs_short_lengths, M.rs_short_target_match
 
   counts = {}
   real_search, real_merge = Matcher._short_target_search, Matcher._merge_short_targets
 
   def per_length(self, pepidx_path):
-    # The shipped pass, once per entry length: its own k rule then picks that length's k.
+    # The shipped pass, once per entry length: its own k rule then picks that length's k. The
+    # histogram is narrowed to one length, and the search call's range clamped to it.
     longest = max(len(s) for _, s in self.query)
-    _, seqs = real_short(pepidx_path, M.MIN_TARGET_LEN, longest)
     frames = []
-    for length in sorted(set(map(len, seqs))):
-      M.rs_short_proteins = lambda p, lo, hi, L=length: real_short(p, L, L + 1)
+    for length, _ in real_lengths(pepidx_path, M.MIN_TARGET_LEN, longest):
+      M.rs_short_lengths = lambda p, lo, hi, L=length: real_lengths(p, L, L + 1)
+      M.rs_short_target_match = (lambda pp, qp, lo, hi, *rest, L=length:
+                                 wrapped_fused(pp, qp, max(lo, L), min(hi, L + 1), *rest))
       try:
         df = real_search(self, pepidx_path)
       finally:
-        M.rs_short_proteins = wrapped_short
+        M.rs_short_lengths, M.rs_short_target_match = wrapped_lengths, wrapped_fused
       if df is not None:
         frames.append(df)
     return pl.concat(frames) if frames else None
@@ -324,8 +329,8 @@ def provenance(args):
   so_sha = sha256(so)
   if args.expect_so_sha256 and so_sha != args.expect_so_sha256:
     sys.exit(f'FATAL: engine sha256 {so_sha[:12]} != the build job\'s {args.expect_so_sha256[:12]}')
-  if not hasattr(_rs, 'rs_short_proteins'):
-    sys.exit('FATAL: this engine has no rs_short_proteins: not the short-targets branch')
+  if not hasattr(_rs, 'rs_short_target_match'):
+    sys.exit('FATAL: this engine has no rs_short_target_match: not the short-targets branch (f7962f3 or later)')
   head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=REPO, capture_output=True, text=True).stdout.strip()
   cpu = ''
   with contextlib.suppress(Exception):
