@@ -235,9 +235,13 @@ fn full_seed_offsets(len: usize, k: usize) -> impl Iterator<Item = usize> {
 /// `max_mismatches` of the peptide.
 ///
 /// Seeding relies on the pigeonhole principle: within the mismatch budget at least one of the
-/// peptide's k-mers is exact, so every index hit is a candidate start. A candidate is verified
-/// with one bounds lookup for its whole window and a plain comparison that stops once the
-/// budget is blown; a window that would run off its protein is rejected.
+/// peptide's k-mers is exact, so every index hit is a candidate start. A peptide holding
+/// max_mismatches + 1 disjoint k-mers needs only that many seeds (the mismatches damage at
+/// most max_mismatches of them), so it looks up its rarest max_mismatches + 1 tiles, as indel
+/// search does. A shorter peptide has no such guarantee and keeps the full seeding, so what
+/// it finds is unchanged. A candidate is verified with one bounds lookup for its whole window
+/// and a plain comparison that stops once the budget is blown; a window that would run off
+/// its protein is rejected.
 fn for_each_mismatch_hit<'a>(
     pep_bytes: &[u8],
     k: usize,
@@ -249,9 +253,14 @@ fn for_each_mismatch_hit<'a>(
     if peptide_len < k {
         return;
     }
+    let seeds: Vec<usize> = if peptide_len >= k * (max_mismatches + 1) {
+        rarest_pigeonhole_seeds(pep_bytes, k, max_mismatches, index).into_iter().map(|(_, idx)| idx).collect()
+    } else {
+        full_seed_offsets(peptide_len, k).collect()
+    };
     let mut seen: HashSet<u64> = HashSet::new();
 
-    for idx in full_seed_offsets(peptide_len, k) {
+    for idx in seeds {
         let Some(positions) = index.lookup(&pep_bytes[idx..idx + k]) else { continue };
         for kmer_hit in positions {
             let position = (kmer_hit % PROTEIN_INDEX_MULTIPLIER) as usize;
@@ -282,12 +291,23 @@ fn for_each_mismatch_hit<'a>(
 }
 
 /// Mismatch search -> (matched sequence, mismatch count, encoded start) per hit.
+///
+/// Rows keep the order of the full seeding, which found each hit from the first of its seeds
+/// that the hit contains exactly and, within a seed, in position order. Sorting on that pair
+/// gives the same rows in the same order whichever seeds were actually looked up.
 fn mismatch_match(peptide: &str, k: usize, max_mismatches: usize, index: &PepIndex) -> Vec<(String, usize, u64)> {
-    let mut matches: Vec<(String, usize, u64)> = Vec::new();
-    for_each_mismatch_hit(peptide.as_bytes(), k, max_mismatches, index, |start, mismatches, window| {
-        matches.push((String::from_utf8(window.to_vec()).unwrap_or_default(), mismatches, start));
+    let pep_bytes = peptide.as_bytes();
+    let mut hits: Vec<(usize, u64, usize, &[u8])> = Vec::new();
+    for_each_mismatch_hit(pep_bytes, k, max_mismatches, index, |start, mismatches, window| {
+        let first_seed = full_seed_offsets(pep_bytes.len(), k)
+            .find(|&idx| window[idx..idx + k] == pep_bytes[idx..idx + k])
+            .expect("a hit contains at least one seed of the full seeding");
+        hits.push((first_seed, start, mismatches, window));
     });
-    matches
+    hits.sort_unstable_by_key(|&(first_seed, start, _, _)| (first_seed, start));
+    hits.into_iter()
+        .map(|(_, start, mismatches, window)| (String::from_utf8(window.to_vec()).unwrap_or_default(), mismatches, start))
+        .collect()
 }
 
 struct HitRecord {
@@ -510,7 +530,7 @@ fn metadata_columns(index: &PepIndex, wanted: Option<Vec<u32>>) -> Result<MetaCo
     Ok((pnum, a, b, c, d, e, g, h, i, j))
 }
 
-/// Seeds for indel search: the n+1 disjoint query tiles with the FEWEST proteome
+/// Seeds for indel and mismatch search: the n+1 disjoint query tiles with the FEWEST proteome
 /// occurrences. Only n+1 disjoint seeds are needed for complete recall (n edits damage at
 /// most n of them, so at least one survives any <=n-indel match and anchors it; extension
 /// then reconstructs the full alignment from that anchor). Any n+1 disjoint seeds satisfy
