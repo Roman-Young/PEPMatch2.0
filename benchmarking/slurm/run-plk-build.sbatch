@@ -57,12 +57,14 @@ text = open(path).read()
 assert text.count(rule) == 1 and 2 <= cap <= 16
 open(path, 'w').write(text.replace(rule, f'  return min({cap}, max(2, length // (edits + 1)))'))
 PY
-  PYTHONPATH="$site" python3 -c "
+  # Run from inside the copy: python -c looks in the current folder first, and the repo
+  # root (where this job starts) has its own pepmatch/.
+  (cd "$site" && PYTHONPATH="$site" python3 -c "
 import pepmatch.matcher as m, sys
 assert m.__file__.startswith('$site'), m.__file__
 got = [m.k_for(40, 0), m.k_for(9, 0), m.k_for(40, 3)]
 want = [$cap, min($cap, 9), min($cap, 10)]
 assert got == want, (got, want)
-print('cap$cap : k for a 40-mer exact / 9-mer exact / 40-mer at 3 mm =', got)"
+print('cap$cap : k for a 40-mer exact / 9-mer exact / 40-mer at 3 mm =', got)")
 done
 echo "builds ready in $RUN_DIR"
