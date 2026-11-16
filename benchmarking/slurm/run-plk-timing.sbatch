@@ -16,8 +16,11 @@ REPO="$HOME/projects/pepmatch/PEPMatch2.0"
 : "${RUN_DIR:?submit through submit-plk-pipeline.sh, which sets RUN_DIR}"
 EXTRA="${EXTRA:-}"
 THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-1},8}"
+: "${CAPS:?submit through submit-plk-pipeline.sh, which sets CAPS}"
+VARIANTS=""
+for cap in $CAPS; do VARIANTS="$VARIANTS --variant cap$cap=$RUN_DIR/site-cap$cap"; done
 
-echo "=== per-length k vs one k per batch ==="
+echo "=== per-length k ceilings vs one k per batch: caps $CAPS ==="
 echo "job     : ${SLURM_JOB_ID:-manual}"
 echo "host    : $(hostname)"
 echo "run dir : $RUN_DIR"
@@ -33,15 +36,13 @@ cp "$REPO/benchmarking/proteomes/human.fasta" "$SCRATCH/"
 
 python3 "$REPO/benchmarking/scripts/time-per-length-k.py" \
   --workdir "$SCRATCH" --outdir "$RUN_DIR" --proteome "$SCRATCH/human.fasta" \
-  --base-site "$RUN_DIR/site-base" --head-site "$RUN_DIR/site-head" \
-  --base-label "$(cat "$RUN_DIR/base-commit.txt")" --head-label "$(cat "$RUN_DIR/head-commit.txt")" \
+  --variant "base=$RUN_DIR/site-base" $VARIANTS \
+  --labels "base $(cat "$RUN_DIR/base-commit.txt"), caps from $(cat "$RUN_DIR/head-commit.txt")" \
   --threads "$THREADS" $EXTRA
 
 echo
-echo "=== paste these back to Kairo ==="
-for f in run-info.txt per-length-k-summary.tsv; do
-  [[ -f "$RUN_DIR/$f" ]] && { echo "----- $f"; cat "$RUN_DIR/$f"; }
-done
+echo "=== run info ==="
+cat "$RUN_DIR/run-info.txt"
 tar -czf "$RUN_DIR.tgz" -C "$(dirname "$RUN_DIR")" --exclude='src-*' --exclude='wheel-*' --exclude='site-*' "$(basename "$RUN_DIR")"
 echo
 echo "full results: $RUN_DIR.tgz"

@@ -1,13 +1,12 @@
-"""Per-length k against one k per batch: speed, first-use cost, memory and identical hits.
+"""Where should per-length k stop? One k per batch against per-length k with a ceiling.
 
-Two builds of PEPMatch are compared on one node, one config at a time:
-  base  one k for the whole batch, taken from its shortest query (master + PRs #39-#42)
-  head  every query at its own k, one index per k (branch test/per-length-k)
-
-Each build is an unpacked wheel in its own folder (--base-site / --head-site); a config runs
-in a fresh process with that folder first on PYTHONPATH, so both builds use the same Python
-and the same polars and differ only in the pepmatch package. A worker refuses to run if
-`pepmatch` was imported from anywhere else.
+Variants are builds of PEPMatch, each an unpacked wheel in its own folder (--variant
+NAME=FOLDER, repeated; the first is the reference the others are compared with):
+  base    one k for the whole batch, taken from its shortest query (master + PRs #39-#42)
+  capN    every query at its own k, k = min(N, length // (edits + 1)); cap16 is uncapped
+A config runs in a fresh process with that folder first on PYTHONPATH, so all variants use
+the same Python and the same polars and differ only in the pepmatch package. A worker
+refuses to run if `pepmatch` was imported from anywhere else.
 
 Query sets:
   the four benchmark sets on their own proteomes (mhc-ligands, neoepitopes, milk-peptides on
@@ -15,20 +14,24 @@ Query sets:
   synthetic sets cut from the human proteome (fixed seed; half carry 1-2 substitutions):
     mixed-N    lengths uniform over 8-25, for N in --sizes
     outlier-N  15-mers with 0.1% 8-mers (the short query that drags a one-k batch down)
-    only9-N, only15-N  single-length controls, where the two builds should tie
+    long-N     lengths uniform over 30-50 (where a ceiling on k matters most)
+    only9-N, only15-N  single-length controls
 Modes: exact, 1-3 mismatches, 1-2 indels, best match (best match only up to --best-max queries).
 
-Per config and build, two processes:
+Per config and variant, two processes:
   cold  empty index folder, one search: total time, time inside the index builder, which
         indexes were built and their size on disk. This is what a first use costs.
   warm  the same folder: one untimed search, then --repeats timed ones (median reported),
         peak memory, and a checksum of the result rows.
-The builds alternate which goes first. A process that runs past --cap-min is stopped and
-reported as capped. Rows are compared between builds as a sorted multiset of (query, matched
-sequence, protein, start, edits); best match is compared on each query's edit count, since a
-tie may name a different protein.
+The variants rotate which goes first. A process that runs past --cap-min is stopped and
+reported as capped. Rows are compared with the first variant as a sorted multiset of (query,
+matched sequence, protein, start, edits); best match is compared on each query's edit count,
+since a tie may name a different protein.
 
-  time-per-length-k.py --workdir W --outdir R --base-site B --head-site H [--smoke]
+Output: per-length-k-results.jsonl (everything), per-length-k-long.tsv (one row per config
+and variant) and per-length-k-summary.tsv (one row per config, variants side by side).
+
+  time-per-length-k.py --workdir W --outdir R --variant base=B --variant cap6=C ... [--smoke]
 """
 import argparse
 import contextlib
@@ -192,6 +195,7 @@ def synthetic_sets(proteins, sizes, workdir):
   outlier = [15] * (n - short) + [8] * short
   layout.shuffle(outlier)
   write(f'outlier-{n}', outlier)
+  write(f'long-{n}', [layout.randint(30, 50) for _ in range(n)])
   write(f'only9-{n}', [9] * n)
   write(f'only15-{n}', [15] * n)
   return sets
@@ -225,39 +229,50 @@ def fmt(value, digits=3):
   return '' if value is None else f'{value:.{digits}f}'
 
 
-def write_summary(results, path):
-  header = ['set', 'queries', 'mode', 'threads',
-            'base_warm_s', 'head_warm_s', 'warm_speedup',
-            'base_cold_s', 'head_cold_s', 'base_build_s', 'head_build_s',
-            'base_ks', 'head_ks', 'base_index_gb', 'head_index_gb',
-            'base_rss_mb', 'head_rss_mb', 'hits', 'identical', 'note']
-  with open(path, 'w', newline='') as f:
+def write_tables(results, names, outdir):
+  reference = names[0]
+  long_header = ['set', 'queries', 'mode', 'threads', 'variant', 'warm_s', 'speedup_vs_' + reference,
+                 'cold_s', 'build_s', 'ks', 'indexes', 'index_gb', 'peak_rss_mb', 'hits', 'identical', 'note']
+  with open(outdir / 'per-length-k-long.tsv', 'w', newline='') as f:
     out = csv.writer(f, delimiter='\t')
-    out.writerow(header)
+    out.writerow(long_header)
     for r in results:
-      base, head = r['base'], r['head']
-      notes = [f'{v} {k}' for v in ('base', 'head') for k in ('capped', 'error') if r[v].get(k)]
-      both = 'rows_sha256' in base and 'rows_sha256' in head
-      speedup = base['warm_s'] / head['warm_s'] if both and head['warm_s'] else None
-      out.writerow([
-        r['set'], r['queries'], r['mode'], r['threads'],
-        fmt(base.get('warm_s')), fmt(head.get('warm_s')), fmt(speedup, 2),
-        fmt(base.get('cold_s'), 2), fmt(head.get('cold_s'), 2), fmt(base.get('build_s'), 2), fmt(head.get('build_s'), 2),
-        ','.join(map(str, base.get('ks', []))), ','.join(map(str, head.get('ks', []))),
-        fmt(base['index_bytes'] / 1e9, 2) if 'index_bytes' in base else '',
-        fmt(head['index_bytes'] / 1e9, 2) if 'index_bytes' in head else '',
-        fmt(base.get('peak_rss_mb'), 0), fmt(head.get('peak_rss_mb'), 0),
-        head.get('hits', base.get('hits', '')),
-        ('yes' if base['rows_sha256'] == head['rows_sha256'] else 'NO') if both else '',
-        '; '.join(notes),
-      ])
+      ref = r['variants'][reference]
+      for name in names:
+        v = r['variants'][name]
+        speedup = ref['warm_s'] / v['warm_s'] if 'warm_s' in ref and v.get('warm_s') else None
+        same = ('yes' if v['rows_sha256'] == ref['rows_sha256'] else 'NO') if 'rows_sha256' in v and 'rows_sha256' in ref else ''
+        out.writerow([
+          r['set'], r['queries'], r['mode'], r['threads'], name, fmt(v.get('warm_s')), fmt(speedup, 2),
+          fmt(v.get('cold_s'), 2), fmt(v.get('build_s'), 2), ','.join(map(str, v.get('ks', []))), len(v.get('ks', [])),
+          fmt(v['index_bytes'] / 1e9, 2) if 'index_bytes' in v else '', fmt(v.get('peak_rss_mb'), 0),
+          v.get('hits', ''), same, 'capped' if v.get('capped') else ('error' if v.get('error') else ''),
+        ])
+  with open(outdir / 'per-length-k-summary.tsv', 'w', newline='') as f:
+    out = csv.writer(f, delimiter='\t')
+    out.writerow(['set', 'queries', 'mode', 'threads']
+                 + [f'{n}_warm_s' for n in names] + [f'{n}_cold_s' for n in names]
+                 + [f'{n}_indexes' for n in names] + ['identical'])
+    for r in results:
+      vs = [r['variants'][n] for n in names]
+      done = all('rows_sha256' in v for v in vs)
+      differ = [n for n, v in zip(names, vs) if done and v['rows_sha256'] != vs[0]['rows_sha256']]
+      unfinished = [n for n, v in zip(names, vs) if 'rows_sha256' not in v]
+      out.writerow([r['set'], r['queries'], r['mode'], r['threads']]
+                   + [fmt(v.get('warm_s')) for v in vs] + [fmt(v.get('cold_s'), 2) for v in vs]
+                   + [len(v.get('ks', [])) for v in vs]
+                   + ['yes' if done and not differ else 'NO ' + ','.join(differ + unfinished)])
 
 
 def driver(args):
   args.workdir, args.outdir = Path(args.workdir).resolve(), Path(args.outdir).resolve()
   args.workdir.mkdir(parents=True, exist_ok=True)
   args.outdir.mkdir(parents=True, exist_ok=True)
-  sites = {'base': Path(args.base_site).resolve(), 'head': Path(args.head_site).resolve()}
+  sites = {}
+  for spec in args.variant:
+    name, _, folder = spec.partition('=')
+    sites[name] = Path(folder).resolve()
+  names = list(sites)
   threads_list = [int(t) for t in args.threads.split(',')]
   sizes = [int(s) for s in args.sizes.split(',')]
 
@@ -296,8 +311,8 @@ def driver(args):
     f'cpus        : {os.cpu_count()}',
     f'threads     : {args.threads}',
     f'repeats     : {args.repeats}   cap per process: {args.cap_min} min',
-    f'base        : {args.base_label}',
-    f'head        : {args.head_label}',
+    f'variants    : {" ".join(names)}  (reference: {names[0]})',
+    f'labels      : {args.labels}',
     f'configs     : {len(configs)}',
     f'started     : {time.strftime("%Y-%m-%dT%H:%M:%S%z")}',
   ]
@@ -305,46 +320,45 @@ def driver(args):
   print('\n'.join(info), flush=True)
 
   results = []
-  shas = {'base': set(), 'head': set()}
+  shas = {name: set() for name in names}
   with open(args.outdir / 'per-length-k-results.jsonl', 'w') as log:
     for number, config in enumerate(configs):
       record = {k: config[k] for k in ('set', 'queries', 'mode', 'threads')}
-      order = ['base', 'head'] if number % 2 == 0 else ['head', 'base']
-      for variant in order:
-        index_dir = args.workdir / 'idx' / variant
+      record['variants'] = {}
+      shift = number % len(names)
+      for name in names[shift:] + names[:shift]:
+        index_dir = args.workdir / 'idx' / name
         if index_dir.exists():
           shutil.rmtree(index_dir)
         index_dir.mkdir(parents=True)
-        result = run_worker(args, sites[variant], 'cold', config, index_dir, config['threads'])
+        result = run_worker(args, sites[name], 'cold', config, index_dir, config['threads'])
         if 'cold_s' in result:
-          warm = run_worker(args, sites[variant], 'warm', config, index_dir, config['threads'])
-          shas[variant].add(result.pop('so_sha256'))
+          warm = run_worker(args, sites[name], 'warm', config, index_dir, config['threads'])
+          shas[name].add(result.pop('so_sha256'))
           warm.pop('so_sha256', None)
           result.update(warm)
-        record[variant] = result
+        record['variants'][name] = result
         shutil.rmtree(index_dir)
       results.append(record)
       log.write(json.dumps(record) + '\n')
       log.flush()
-      write_summary(results, args.outdir / 'per-length-k-summary.tsv')
-      base, head = record['base'], record['head']
-      same = ''
-      if 'rows_sha256' in base and 'rows_sha256' in head:
-        same = 'identical' if base['rows_sha256'] == head['rows_sha256'] else 'ROWS DIFFER'
-      print(f"[{number + 1}/{len(configs)}] {config['set']} {config['mode']} t={config['threads']}: "
-            f"base {fmt(base.get('warm_s')) or base}  head {fmt(head.get('warm_s')) or head}  {same}", flush=True)
+      write_tables(results, names, args.outdir)
+      ref = record['variants'][names[0]]
+      line = '  '.join(f"{n} {fmt(record['variants'][n].get('warm_s')) or 'FAIL'}" for n in names)
+      same = all(record['variants'][n].get('rows_sha256') == ref.get('rows_sha256') for n in names) and 'rows_sha256' in ref
+      print(f"[{number + 1}/{len(configs)}] {config['set']} {config['mode']} t={config['threads']}: {line}  "
+            f"{'identical' if same else 'ROWS DIFFER OR FAILED'}", flush=True)
 
-  different = [r for r in results if 'rows_sha256' in r['base'] and 'rows_sha256' in r['head']
-               and r['base']['rows_sha256'] != r['head']['rows_sha256']]
-  unfinished = [r for r in results if 'rows_sha256' not in r['base'] or 'rows_sha256' not in r['head']]
+  bad = [r for r in results
+         if not all(r['variants'][n].get('rows_sha256') == r['variants'][names[0]].get('rows_sha256')
+                    and 'rows_sha256' in r['variants'][n] for n in names)]
   with open(args.outdir / 'run-info.txt', 'a') as f:
     f.write(f'finished    : {time.strftime("%Y-%m-%dT%H:%M:%S%z")}\n')
-    f.write(f'base engine : {sorted(shas["base"])}\n')
-    f.write(f'head engine : {sorted(shas["head"])}\n')
-    f.write(f'compared    : {len(results) - len(unfinished)} of {len(results)} configs\n')
-    f.write(f'rows differ : {len(different)}\n')
-    f.write(f'capped/error: {len(unfinished)}\n')
-  print(f'\ncompared {len(results) - len(unfinished)} of {len(results)}; rows differ in {len(different)}; capped or failed {len(unfinished)}')
+    for name in names:
+      f.write(f'engine {name:5}: {sorted(shas[name])}\n')
+    f.write(f'identical   : {len(results) - len(bad)} of {len(results)} configs (all variants)\n')
+    f.write(f'not identical or capped/failed: {len(bad)}\n')
+  print(f'\nidentical in {len(results) - len(bad)} of {len(results)} configs; not identical or failed: {len(bad)}')
 
 
 def main():
@@ -357,10 +371,8 @@ def main():
   parser.add_argument('--index-dir')
   parser.add_argument('--workdir')
   parser.add_argument('--outdir')
-  parser.add_argument('--base-site')
-  parser.add_argument('--head-site')
-  parser.add_argument('--base-label', default='')
-  parser.add_argument('--head-label', default='')
+  parser.add_argument('--variant', action='append', default=[], help='NAME=FOLDER; the first is the reference')
+  parser.add_argument('--labels', default='', help='free text for run-info, e.g. the commits')
   parser.add_argument('--proteome', default=str(BENCH / 'proteomes' / 'human.fasta'))
   parser.add_argument('--threads', default=str(os.cpu_count()))
   parser.add_argument('--sizes', default='1000,10000,100000')
@@ -374,9 +386,11 @@ def main():
   if args.worker:
     worker(args)
   else:
-    for required in ('workdir', 'outdir', 'base_site', 'head_site'):
+    for required in ('workdir', 'outdir'):
       if not getattr(args, required):
-        parser.error(f'--{required.replace("_", "-")} is required')
+        parser.error(f'--{required} is required')
+    if len(args.variant) < 2 or any('=' not in v for v in args.variant):
+      parser.error('give at least two --variant NAME=FOLDER')
     driver(args)
 
 
