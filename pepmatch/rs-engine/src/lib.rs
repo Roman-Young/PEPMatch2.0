@@ -15,8 +15,9 @@ fn rs_version() -> &'static str {
 }
 
 #[pyfunction]
-fn rs_preprocess(fasta_path: &str, k: usize, output_path: &str) {
-    preprocess::run(fasta_path, k, output_path);
+#[pyo3(signature = (fasta_path, k, output_path, max_slice_occurrences=None))]
+fn rs_preprocess(fasta_path: &str, k: usize, output_path: &str, max_slice_occurrences: Option<usize>) {
+    preprocess::run(fasta_path, k, output_path, max_slice_occurrences);
 }
 
 #[pyfunction]

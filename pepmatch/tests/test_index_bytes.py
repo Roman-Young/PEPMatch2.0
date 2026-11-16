@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from pepmatch import Preprocessor
+from pepmatch._rs import rs_preprocess
 
 DATA = Path(__file__).parent / 'data'
 KS = (2, 3, 5, 9, 16)
@@ -103,8 +104,20 @@ def test_index_is_byte_identical_to_the_original_builder(name, k, tmp_path):
   assert index_sha256(name, k, tmp_path) == EXPECTED[(name, k)]
 
 
-def test_build_leaves_no_chunk_merge_or_temporary_file(tmp_path):
+@pytest.mark.parametrize('name', ['proteome', 'edge', 'many'])
+@pytest.mark.parametrize('k', KS)
+@pytest.mark.parametrize('max_slice_occurrences', [1, 1_000, 50_000])
+def test_index_built_in_slices_is_byte_identical(name, k, max_slice_occurrences, tmp_path):
+  """Inputs above the slice bound are sorted and written one range of k-mers at a time. A
+  small bound forces that path here (1 = one slice per two-residue prefix); the file must not
+  change."""
+  out = tmp_path / f'{name}_{k}.pepidx'
+  rs_preprocess(str(source_fasta(name, tmp_path)), k, str(out), max_slice_occurrences)
+  assert hashlib.sha256(out.read_bytes()).hexdigest() == EXPECTED[(name, k)]
+
+
+def test_build_leaves_no_temporary_file(tmp_path):
   fasta = source_fasta('edge', tmp_path)
   Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path)).preprocess(3)
   assert (tmp_path / 'edge_3mers.pepidx').is_file()
-  assert not [p.name for p in tmp_path.iterdir() if '.chunk_' in p.name or '.merged' in p.name or '.tmp.' in p.name]
+  assert not [p.name for p in tmp_path.iterdir() if '.tmp.' in p.name]

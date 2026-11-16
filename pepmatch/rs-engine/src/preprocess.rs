@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write, BufWriter, Read};
+use std::io::{BufRead, BufReader, Write, BufWriter};
 
 use rayon::prelude::*;
 
@@ -11,9 +11,12 @@ use rayon::prelude::*;
 // multiplier is also the hard cap on protein length.
 const PROTEIN_INDEX_MULTIPLIER: u64 = 100_000_000;
 
-// The sorting build holds one 24-byte record per k-mer occurrence (0.7 GB for the human
-// proteome). Above this many occurrences the batched build is used instead.
-const SORT_BUILD_MAX_OCCURRENCES: usize = 200_000_000;
+// The build holds one 24-byte record per k-mer occurrence it is sorting (0.3 GB for the human
+// proteome at k=9). Up to ONE_PASS_MAX_OCCURRENCES everything is sorted at once; larger inputs
+// are sorted and written one slice of at most SLICE_OCCURRENCES at a time (1.2 GB), which stays
+// below the 8+ bytes per occurrence the earlier chunk-and-merge builder held at those sizes.
+const ONE_PASS_MAX_OCCURRENCES: usize = 200_000_000;
+const SLICE_OCCURRENCES: usize = 50_000_000;
 
 struct Protein {
     header: String,
@@ -188,240 +191,6 @@ fn write_length_prefixed(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(bytes);
 }
 
-/// Records are `[k bytes of k-mer][u32 count][count * u64 position]`.
-fn write_kmer_chunk(kmer_map: HashMap<u128, Vec<u64>>, chunk_path: &str, k: usize) -> u64 {
-    let mut sorted: Vec<(u128, Vec<u64>)> = kmer_map.into_iter().collect();
-    // Sorting the u128 sorts the k-mers lexicographically: the k-mer is packed big-endian,
-    // one residue byte per byte, so numeric order and byte order agree. (Requires k <= 16.)
-    sorted.sort_unstable_by_key(|a| a.0);
-
-    let file = File::create(chunk_path).expect("Cannot create chunk file");
-    let mut writer = BufWriter::new(file);
-    let mut count: u64 = 0;
-
-    for (kmer, positions) in &sorted {
-        let kmer_bytes = &kmer.to_be_bytes()[16 - k..];
-        writer.write_all(kmer_bytes).unwrap();
-        writer.write_all(&(positions.len() as u32).to_le_bytes()).unwrap();
-        for &pos in positions {
-            writer.write_all(&pos.to_le_bytes()).unwrap();
-        }
-        count += 1;
-    }
-
-    writer.flush().unwrap();
-    count
-}
-
-struct ChunkReader {
-    reader: BufReader<File>,
-    k: usize,
-    current_kmer: Option<u128>,
-    current_positions: Vec<u64>,
-}
-
-impl ChunkReader {
-    fn new(path: &str, k: usize) -> Self {
-        let file = File::open(path).expect("Cannot open chunk file");
-        let mut cr = ChunkReader {
-            reader: BufReader::new(file),
-            k,
-            current_kmer: None,
-            current_positions: Vec::new(),
-        };
-        cr.advance();
-        cr
-    }
-
-    fn advance(&mut self) {
-        let mut kmer_bytes = vec![0u8; self.k];
-        if self.reader.read_exact(&mut kmer_bytes).is_err() {
-            self.current_kmer = None;
-            self.current_positions.clear();
-            return;
-        }
-
-        let mut kmer_val: u128 = 0;
-        for &b in &kmer_bytes {
-            kmer_val = (kmer_val << 8) | b as u128;
-        }
-
-        let mut count_bytes = [0u8; 4];
-        self.reader.read_exact(&mut count_bytes).unwrap();
-        let count = u32::from_le_bytes(count_bytes) as usize;
-
-        self.current_positions.clear();
-        for _ in 0..count {
-            let mut pos_bytes = [0u8; 8];
-            self.reader.read_exact(&mut pos_bytes).unwrap();
-            self.current_positions.push(u64::from_le_bytes(pos_bytes));
-        }
-
-        self.current_kmer = Some(kmer_val);
-    }
-}
-
-/// Layout, in order: 8-byte magic, k (u8), protein count (u32), sequence length (u64),
-/// unique k-mer count (u64), total positions (u64), metadata length (u64); then the
-/// concatenated sequences, protein offsets, metadata offsets, metadata blob, k-mer offsets,
-/// k-mer data. Every section start is derivable from the fixed-size header, which is what
-/// lets the query side mmap the file and binary-search it without parsing.
-fn write_pepidx(path: &str, k: usize, proteins: &[Protein], metadata_list: &[Metadata]) {
-    let file = File::create(path).expect("Cannot create output file");
-    let mut writer = BufWriter::new(file);
-
-    // Sequences live end to end in one buffer; `protein_offsets` is the only record of where
-    // each protein begins, so query-side bounds checks all go through it.
-    let mut concat_seq = Vec::new();
-    let mut protein_offsets: Vec<u64> = Vec::with_capacity(proteins.len());
-    for protein in proteins {
-        protein_offsets.push(concat_seq.len() as u64);
-        concat_seq.extend_from_slice(protein.sequence.as_bytes());
-    }
-
-    // External sort, to bound peak memory on proteome-scale input: 50k proteins at a time,
-    // each batch sorted and spilled to its own chunk file, then k-way merged below.
-    let chunk_size = 50_000;
-    let mut chunk_paths: Vec<String> = Vec::new();
-    let mut total_positions: u64 = 0;
-
-    let mut chunk_start = 0;
-    while chunk_start < proteins.len() {
-        let chunk_end = std::cmp::min(chunk_start + chunk_size, proteins.len());
-        let mut kmer_map: HashMap<u128, Vec<u64>> = HashMap::new();
-
-        for protein_count in chunk_start..chunk_end {
-            let seq = proteins[protein_count].sequence.as_bytes();
-            if seq.len() < k {
-                continue;
-            }
-            let protein_number = (protein_count + 1) as u64;
-            for j in 0..=(seq.len() - k) {
-                let mut kmer_val: u128 = 0;
-                for &b in &seq[j..j + k] {
-                    kmer_val = (kmer_val << 8) | b as u128;
-                }
-                let idx = protein_number * PROTEIN_INDEX_MULTIPLIER + j as u64;
-                kmer_map.entry(kmer_val).or_default().push(idx);
-                total_positions += 1;
-            }
-        }
-
-        let chunk_path = format!("{}.chunk_{}", path, chunk_paths.len());
-        write_kmer_chunk(kmer_map, &chunk_path, k);
-        chunk_paths.push(chunk_path);
-        chunk_start = chunk_end;
-    }
-
-    let mut metadata_buf: Vec<u8> = Vec::new();
-    let mut metadata_offsets: Vec<u64> = Vec::with_capacity(proteins.len());
-    for meta in metadata_list {
-        metadata_offsets.push(metadata_buf.len() as u64);
-        write_length_prefixed(&mut metadata_buf, &meta.protein_id);
-        write_length_prefixed(&mut metadata_buf, &meta.protein_name);
-        write_length_prefixed(&mut metadata_buf, &meta.species);
-        write_length_prefixed(&mut metadata_buf, &meta.taxon_id);
-        write_length_prefixed(&mut metadata_buf, &meta.gene);
-        write_length_prefixed(&mut metadata_buf, &meta.pe_level);
-        write_length_prefixed(&mut metadata_buf, &meta.sequence_version);
-        write_length_prefixed(&mut metadata_buf, &meta.gene_priority);
-        write_length_prefixed(&mut metadata_buf, &meta.swissprot);
-    }
-
-    // K-way merge: take the smallest k-mer at any cursor and concatenate the position lists
-    // of every chunk holding it, giving one sorted run with each k-mer appearing once.
-    let mut readers: Vec<ChunkReader> = chunk_paths.iter()
-        .map(|p| ChunkReader::new(p, k))
-        .collect();
-
-    let merged_path = format!("{}.merged", path);
-    let merged_file = File::create(&merged_path).expect("Cannot create merged file");
-    let mut merged_writer = BufWriter::new(merged_file);
-    let mut num_unique_kmers: u64 = 0;
-
-    loop {
-        let mut min_kmer: Option<u128> = None;
-        for reader in &readers {
-            if let Some(kmer) = reader.current_kmer {
-                if min_kmer.is_none() || kmer < min_kmer.unwrap() {
-                    min_kmer = Some(kmer);
-                }
-            }
-        }
-
-        let min_kmer = match min_kmer {
-            Some(k) => k,
-            None => break,
-        };
-
-        let mut all_positions: Vec<u64> = Vec::new();
-        for reader in &mut readers {
-            if reader.current_kmer == Some(min_kmer) {
-                all_positions.extend_from_slice(&reader.current_positions);
-                reader.advance();
-            }
-        }
-
-        let kmer_bytes = &min_kmer.to_be_bytes()[16 - k..];
-        merged_writer.write_all(kmer_bytes).unwrap();
-        merged_writer.write_all(&(all_positions.len() as u32).to_le_bytes()).unwrap();
-        for &pos in &all_positions {
-            merged_writer.write_all(&pos.to_le_bytes()).unwrap();
-        }
-
-        num_unique_kmers += 1;
-    }
-    merged_writer.flush().unwrap();
-    drop(merged_writer);
-
-    for chunk_path in &chunk_paths {
-        std::fs::remove_file(chunk_path).ok();
-    }
-
-    // Final pass records where each k-mer's record starts — the table the query-side binary
-    // search indexes into.
-    let mut merged_reader = ChunkReader::new(&merged_path, k);
-    let mut kmer_offsets: Vec<u64> = Vec::with_capacity(num_unique_kmers as usize);
-    let mut kmer_data: Vec<u8> = Vec::new();
-
-    loop {
-        match merged_reader.current_kmer {
-            None => break,
-            Some(kmer) => {
-                kmer_offsets.push(kmer_data.len() as u64);
-                let kmer_bytes = &kmer.to_be_bytes()[16 - k..];
-                kmer_data.extend_from_slice(kmer_bytes);
-                kmer_data.extend_from_slice(&(merged_reader.current_positions.len() as u32).to_le_bytes());
-                for &pos in &merged_reader.current_positions {
-                    kmer_data.extend_from_slice(&pos.to_le_bytes());
-                }
-                merged_reader.advance();
-            }
-        }
-    }
-
-    std::fs::remove_file(&merged_path).ok();
-    writer.write_all(b"PEPIDX05").unwrap();
-    writer.write_all(&(k as u8).to_le_bytes()).unwrap();
-    writer.write_all(&(proteins.len() as u32).to_le_bytes()).unwrap();
-    writer.write_all(&(concat_seq.len() as u64).to_le_bytes()).unwrap();
-    writer.write_all(&num_unique_kmers.to_le_bytes()).unwrap();
-    writer.write_all(&total_positions.to_le_bytes()).unwrap();
-    writer.write_all(&(metadata_buf.len() as u64).to_le_bytes()).unwrap();
-    writer.write_all(&concat_seq).unwrap();
-    for &offset in &protein_offsets {
-        writer.write_all(&offset.to_le_bytes()).unwrap();
-    }
-    for &offset in &metadata_offsets {
-        writer.write_all(&offset.to_le_bytes()).unwrap();
-    }
-    writer.write_all(&metadata_buf).unwrap();
-    for &offset in &kmer_offsets {
-        writer.write_all(&offset.to_le_bytes()).unwrap();
-    }
-    writer.write_all(&kmer_data).unwrap();
-    writer.flush().unwrap();
-}
 
 /// One k-mer occurrence. The k-mer is packed big-endian into (hi, lo), so the derived order is
 /// the k-mers' byte order and then position order: the order the index stores them in.
@@ -442,51 +211,85 @@ fn kmer_run_end(occurrences: &[Occurrence], start: usize) -> usize {
     end
 }
 
-/// Writes the same file as `write_pepidx`, byte for byte, by sorting every k-mer occurrence
-/// in one flat array on all cores instead of hashing them per batch and merging chunk files.
-/// The index is written once, to a temporary name, and renamed into place when complete, so
-/// an interrupted build never leaves a partial .pepidx behind.
-fn write_pepidx_sorted(path: &str, k: usize, proteins: &[Protein], metadata_list: &[Metadata]) {
+/// The first two residues of every k-mer as a u16 (k is at least 2). K-mers sort by these
+/// first, so a contiguous range of prefixes is a contiguous stretch of the index.
+fn for_each_prefix(proteins: &[Protein], k: usize, mut visit: impl FnMut(usize)) {
+    for protein in proteins {
+        let seq = protein.sequence.as_bytes();
+        for j in 0..(seq.len() + 1).saturating_sub(k) {
+            visit((seq[j] as usize) << 8 | seq[j + 1] as usize);
+        }
+    }
+}
+
+/// Splits the k-mers into contiguous prefix ranges of at most `slice` occurrences each (one
+/// range when the total fits in `one_pass_max`), returned as (first prefix, end prefix,
+/// occurrences). A single prefix with more occurrences than `slice` gets a range of its own.
+fn slice_ranges(proteins: &[Protein], k: usize, total: usize, one_pass_max: usize, slice: usize) -> Vec<(usize, usize, usize)> {
+    if total <= one_pass_max {
+        return vec![(0, 1 << 16, total)];
+    }
+    let mut counts = vec![0usize; 1 << 16];
+    for_each_prefix(proteins, k, |prefix| counts[prefix] += 1);
+    let mut ranges = Vec::new();
+    let (mut start, mut held) = (0, 0);
+    for (prefix, &count) in counts.iter().enumerate() {
+        if held > 0 && held + count > slice {
+            ranges.push((start, prefix, held));
+            start = prefix;
+            held = 0;
+        }
+        held += count;
+    }
+    ranges.push((start, 1 << 16, held));
+    ranges
+}
+
+/// Every occurrence of a k-mer whose prefix lies in `range`, sorted on all cores.
+fn sorted_occurrences(proteins: &[Protein], k: usize, range: (usize, usize, usize)) -> Vec<Occurrence> {
+    let mask: u128 = if k == 16 { u128::MAX } else { (1u128 << (8 * k)) - 1 };
+    let shift = 8 * (k - 2);
+    let mut occurrences = Vec::with_capacity(range.2);
+    for (protein_count, protein) in proteins.iter().enumerate() {
+        let protein_number = (protein_count + 1) as u64;
+        // Rolling pack: each residue shifts in and the mask drops the one that left the k-mer.
+        let mut kmer_val: u128 = 0;
+        for (j, &b) in protein.sequence.as_bytes().iter().enumerate() {
+            kmer_val = ((kmer_val << 8) | b as u128) & mask;
+            if j + 1 >= k {
+                let prefix = (kmer_val >> shift) as usize;
+                if range.0 <= prefix && prefix < range.1 {
+                    occurrences.push(Occurrence {
+                        hi: (kmer_val >> 64) as u64,
+                        lo: kmer_val as u64,
+                        position: protein_number * PROTEIN_INDEX_MULTIPLIER + (j + 1 - k) as u64,
+                    });
+                }
+            }
+        }
+    }
+    occurrences.par_sort_unstable();
+    occurrences
+}
+
+/// Layout, in order: 8-byte magic, k (u8), protein count (u32), sequence length (u64),
+/// unique k-mer count (u64), total positions (u64), metadata length (u64); then the
+/// concatenated sequences, protein offsets, metadata offsets, metadata blob, k-mer offsets,
+/// k-mer data. Every section start is derivable from the fixed-size header, which is what
+/// lets the query side mmap the file and binary-search it without parsing.
+///
+/// Each k-mer record is `[k bytes of k-mer][u32 count][count * u64 position]`, k-mers in byte
+/// order and positions ascending. The k-mer offsets come before the records, so the slices
+/// are sorted once to measure the records and again to write them; with one slice (any input
+/// up to `one_pass_max`) the sorted occurrences are kept and sorted only once. The index is
+/// written to a temporary name and renamed into place when complete, so an interrupted build
+/// never leaves a partial .pepidx behind.
+fn write_pepidx(path: &str, k: usize, proteins: &[Protein], metadata_list: &[Metadata], one_pass_max: usize, slice: usize) {
     let mut concat_seq = Vec::new();
     let mut protein_offsets: Vec<u64> = Vec::with_capacity(proteins.len());
     for protein in proteins {
         protein_offsets.push(concat_seq.len() as u64);
         concat_seq.extend_from_slice(protein.sequence.as_bytes());
-    }
-
-    let total: usize = proteins.iter().map(|p| (p.sequence.len() + 1).saturating_sub(k)).sum();
-    let mut occurrences: Vec<Occurrence> = Vec::with_capacity(total);
-    let mask: u128 = if k == 16 { u128::MAX } else { (1u128 << (8 * k)) - 1 };
-    for (protein_count, protein) in proteins.iter().enumerate() {
-        let seq = protein.sequence.as_bytes();
-        if seq.len() < k {
-            continue;
-        }
-        let protein_number = (protein_count + 1) as u64;
-        // Rolling pack: each residue shifts in and the mask drops the one that left the k-mer.
-        let mut kmer_val: u128 = 0;
-        for (j, &b) in seq.iter().enumerate() {
-            kmer_val = ((kmer_val << 8) | b as u128) & mask;
-            if j + 1 >= k {
-                occurrences.push(Occurrence {
-                    hi: (kmer_val >> 64) as u64,
-                    lo: kmer_val as u64,
-                    position: protein_number * PROTEIN_INDEX_MULTIPLIER + (j + 1 - k) as u64,
-                });
-            }
-        }
-    }
-    occurrences.par_sort_unstable();
-
-    // Sorted, each k-mer is one contiguous run, so its record's offset is the bytes before it.
-    let mut kmer_offsets: Vec<u64> = Vec::new();
-    let mut kmer_data_len: u64 = 0;
-    let mut start = 0;
-    while start < occurrences.len() {
-        let end = kmer_run_end(&occurrences, start);
-        kmer_offsets.push(kmer_data_len);
-        kmer_data_len += (k + 4 + 8 * (end - start)) as u64;
-        start = end;
     }
 
     let mut metadata_buf: Vec<u8> = Vec::new();
@@ -504,6 +307,27 @@ fn write_pepidx_sorted(path: &str, k: usize, proteins: &[Protein], metadata_list
         write_length_prefixed(&mut metadata_buf, &meta.swissprot);
     }
 
+    let total: usize = proteins.iter().map(|p| (p.sequence.len() + 1).saturating_sub(k)).sum();
+    let ranges = slice_ranges(proteins, k, total, one_pass_max, slice);
+
+    // Sorted, each k-mer is one contiguous run, so its record's offset is the bytes before it.
+    let mut kept: Option<Vec<Occurrence>> = None;
+    let mut kmer_offsets: Vec<u64> = Vec::new();
+    let mut kmer_data_len: u64 = 0;
+    for &range in &ranges {
+        let occurrences = sorted_occurrences(proteins, k, range);
+        let mut start = 0;
+        while start < occurrences.len() {
+            let end = kmer_run_end(&occurrences, start);
+            kmer_offsets.push(kmer_data_len);
+            kmer_data_len += (k + 4 + 8 * (end - start)) as u64;
+            start = end;
+        }
+        if ranges.len() == 1 {
+            kept = Some(occurrences);
+        }
+    }
+
     let tmp_path = format!("{}.tmp.{}", path, std::process::id());
     let file = File::create(&tmp_path).expect("Cannot create output file");
     let mut writer = BufWriter::new(file);
@@ -512,7 +336,7 @@ fn write_pepidx_sorted(path: &str, k: usize, proteins: &[Protein], metadata_list
     writer.write_all(&(proteins.len() as u32).to_le_bytes()).unwrap();
     writer.write_all(&(concat_seq.len() as u64).to_le_bytes()).unwrap();
     writer.write_all(&(kmer_offsets.len() as u64).to_le_bytes()).unwrap();
-    writer.write_all(&(occurrences.len() as u64).to_le_bytes()).unwrap();
+    writer.write_all(&(total as u64).to_le_bytes()).unwrap();
     writer.write_all(&(metadata_buf.len() as u64).to_le_bytes()).unwrap();
     writer.write_all(&concat_seq).unwrap();
     for &offset in &protein_offsets {
@@ -525,29 +349,33 @@ fn write_pepidx_sorted(path: &str, k: usize, proteins: &[Protein], metadata_list
     for &offset in &kmer_offsets {
         writer.write_all(&offset.to_le_bytes()).unwrap();
     }
-    let mut start = 0;
-    while start < occurrences.len() {
-        let end = kmer_run_end(&occurrences, start);
-        let kmer = ((occurrences[start].hi as u128) << 64) | occurrences[start].lo as u128;
-        writer.write_all(&kmer.to_be_bytes()[16 - k..]).unwrap();
-        writer.write_all(&((end - start) as u32).to_le_bytes()).unwrap();
-        for occurrence in &occurrences[start..end] {
-            writer.write_all(&occurrence.position.to_le_bytes()).unwrap();
+    for &range in &ranges {
+        let occurrences = kept.take().unwrap_or_else(|| sorted_occurrences(proteins, k, range));
+        let mut start = 0;
+        while start < occurrences.len() {
+            let end = kmer_run_end(&occurrences, start);
+            let kmer = ((occurrences[start].hi as u128) << 64) | occurrences[start].lo as u128;
+            writer.write_all(&kmer.to_be_bytes()[16 - k..]).unwrap();
+            writer.write_all(&((end - start) as u32).to_le_bytes()).unwrap();
+            for occurrence in &occurrences[start..end] {
+                writer.write_all(&occurrence.position.to_le_bytes()).unwrap();
+            }
+            start = end;
         }
-        start = end;
     }
     writer.flush().unwrap();
     drop(writer);
     std::fs::rename(&tmp_path, path).expect("Cannot move the finished index into place");
 }
 
-pub(crate) fn run(fasta_path: &str, k: usize, output_path: &str) {
+/// `max_slice_occurrences` is None in normal use; tests set it to build small inputs in several
+/// slices of at most that many occurrences.
+pub(crate) fn run(fasta_path: &str, k: usize, output_path: &str, max_slice_occurrences: Option<usize>) {
     let proteins = parse_fasta(fasta_path);
     let metadata_list = extract_all_metadata(&proteins);
-    let occurrences: usize = proteins.iter().map(|p| (p.sequence.len() + 1).saturating_sub(k)).sum();
-    if occurrences <= SORT_BUILD_MAX_OCCURRENCES {
-        write_pepidx_sorted(output_path, k, &proteins, &metadata_list);
-    } else {
-        write_pepidx(output_path, k, &proteins, &metadata_list);
-    }
+    let (one_pass_max, slice) = match max_slice_occurrences {
+        Some(bound) => (bound.max(1), bound.max(1)),
+        None => (ONE_PASS_MAX_OCCURRENCES, SLICE_OCCURRENCES),
+    };
+    write_pepidx(output_path, k, &proteins, &metadata_list, one_pass_max, slice);
 }
