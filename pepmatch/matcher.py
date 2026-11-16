@@ -376,7 +376,7 @@ class Matcher:
       if is_indels:
         results = rs_indel_match(pepidx_path, group, edits)
       else:
-        results = rs_match(pepidx_path, group, k, edits)
+        results = rs_match(pepidx_path, group, edits)
       frames.append(self._to_dataframe(results, pepidx_path, is_indels))
     return frames
 
@@ -420,7 +420,7 @@ class Matcher:
     for k, group in self._groups(self._positional_query(), edits):
       pepidx_path = self._index(k)
       print(f"Counting {len(group)} peptides against {self.proteome_name} (k={k}, max_mismatches={edits})...")
-      qid, qseq, mm, count = rs_match_counts(pepidx_path, group, k, edits)
+      qid, qseq, mm, count = rs_match_counts(pepidx_path, group, edits)
       frames.append(pl.DataFrame({'Query ID': qid, 'Query Sequence': qseq, 'Mismatches': mm, 'Count': count}, schema=schema))
     return self._with_query_ids(self._in_query_order(frames))
 

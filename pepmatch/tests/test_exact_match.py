@@ -173,7 +173,7 @@ def test_exact_engine_invariant_to_k(mini_proteome, tmp_path):
   for k in (2, 3, 5, 6):
     index = tmp_path / f'mini_{k}mers.pepidx'
     rs_preprocess(str(mini_proteome), k, str(index))
-    _, qseq, matched, pnum, _, _, start, _ = rs_match(str(index), queries, k, 0)
+    _, qseq, matched, pnum, _, _, start, _ = rs_match(str(index), queries, 0)
     found[k] = {(q, p, s) for q, m, p, s in zip(qseq, matched, pnum, start) if m is not None}
   assert found[2] and found[2] == found[3] == found[5] == found[6]
   assert reported_hits(run_mini(mini_proteome, tmp_path)) == brute_force_hits(MINI_QUERIES)

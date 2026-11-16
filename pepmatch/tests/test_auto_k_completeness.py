@@ -162,7 +162,7 @@ def test_auto_k_recovers_match_that_hardcoded_k5_dropped(proteome_path, tmp_path
   # The engine asked directly at k=5, as the old hardcoded default did.
   index = tmp_path / 'hardcoded_5mers.pepidx'
   rs_preprocess(str(proteome_path), 5, str(index))
-  hardcoded_k5 = rs_match(str(index), [('1', peptide)], 5, 1)[2]
+  hardcoded_k5 = rs_match(str(index), [('1', peptide)], 1)[2]
 
   # auto-k is complete and finds the match; the old hardcoded k=5 drops it.
   assert source_match in auto_k

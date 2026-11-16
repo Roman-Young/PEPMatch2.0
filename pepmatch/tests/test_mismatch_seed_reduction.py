@@ -121,7 +121,7 @@ def _search(fasta, tmp_path, queries, max_mismatches, k):
     return rows
   index = _engine_index(fasta, tmp_path, k)
   numbered = [(str(i + 1), q) for i, q in enumerate(queries)]
-  for qid, _, matched, protein, mm, positions, start, _ in zip(*rs_match(index, numbered, k, max_mismatches)):
+  for qid, _, matched, protein, mm, positions, start, _ in zip(*rs_match(index, numbered, max_mismatches)):
     if matched is not None:
       rows.setdefault(qid, []).append((f'p{protein}', start, matched, mm, positions))   # FASTA ids are p1, p2, ...
   return rows
@@ -136,7 +136,7 @@ def _counts(fasta, tmp_path, queries, max_mismatches, k):
     ).match()
     return {(row['Query ID'], row['Mismatches']): row['Count'] for row in df.iter_rows(named=True)}
   numbered = [(str(i + 1), q) for i, q in enumerate(queries)]
-  qid, _, mm, count = rs_match_counts(_engine_index(fasta, tmp_path, k), numbered, k, max_mismatches)
+  qid, _, mm, count = rs_match_counts(_engine_index(fasta, tmp_path, k), numbered, max_mismatches)
   return dict(zip(zip(qid, mm), count))
 
 

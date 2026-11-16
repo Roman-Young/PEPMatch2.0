@@ -20,8 +20,8 @@ fn rs_preprocess(fasta_path: &str, k: usize, output_path: &str) {
 }
 
 #[pyfunction]
-fn rs_match(pepidx_path: &str, peptides: Vec<(String, String)>, k: usize, max_mismatches: usize) -> matching::Columns {
-    matching::run(pepidx_path, peptides, k, max_mismatches)
+fn rs_match(pepidx_path: &str, peptides: Vec<(String, String)>, max_mismatches: usize) -> matching::Columns {
+    matching::run(pepidx_path, peptides, max_mismatches)
 }
 
 #[pyfunction]
@@ -38,8 +38,8 @@ fn rs_metadata(pepidx_path: &str, protein_nums: Option<Vec<u32>>) -> PyResult<ma
 }
 
 #[pyfunction]
-fn rs_match_counts(pepidx_path: &str, peptides: Vec<(String, String)>, k: usize, max_mismatches: usize) -> matching::CountColumns {
-    matching::run_counts(pepidx_path, peptides, k, max_mismatches)
+fn rs_match_counts(pepidx_path: &str, peptides: Vec<(String, String)>, max_mismatches: usize) -> matching::CountColumns {
+    matching::run_counts(pepidx_path, peptides, max_mismatches)
 }
 
 #[pyfunction]
