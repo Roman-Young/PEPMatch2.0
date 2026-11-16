@@ -21,7 +21,6 @@ def test_mismatching(proteome_path, query_path, expected_path):
     query=query_path,
     proteome_file=proteome_path,
     max_mismatches=3,
-    k=3,
     output_format='dataframe'
   ).match()
 
@@ -52,7 +51,7 @@ def test_mismatch_recall_warning_fires_for_short_query(tmp_path, capsys):
 
 
 def test_mismatch_recall_warning_silent_when_guaranteed(tmp_path, capsys):
-  # A length-9 query at 2 mismatches derives k=3, threshold 9, so every query length is
+  # A length-9 query at 2 mismatches derives threshold 9, so every query length is
   # covered -- no warning should be printed.
   proteome_path = tmp_path / 'proteome.fasta'
   proteome_path.write_text('>P1\nZZABCDEFGHIKLMNPQRSZZ\n')
@@ -64,11 +63,9 @@ def test_mismatch_recall_warning_silent_when_guaranteed(tmp_path, capsys):
 
 # --- Hamming oracle machinery -------------------------------------------------
 #
-# The mismatch engine has TWO code paths: when `len(query) % k == 0` it verifies the
-# flanks as whole k-mer blocks, otherwise it verifies them residue by residue. Both
-# must agree with a plain Hamming scan, so the proteome/query set below deliberately
-# contains queries of length 9, 10, 11 and 12 -- at k=3 and k=4 each regime is
-# populated (asserted in the test, so a future query edit cannot silently drop one).
+# The proteome/query set below deliberately contains queries of length 9, 10, 11 and 12, so
+# the queries are searched at different k and with k both dividing and not dividing their
+# length. All of it must agree with a plain Hamming scan.
 #
 # Every record is padded with a run of W at both ends, and no query contains a W.
 # The engine's index is a flat concatenation with no per-protein end guard (see
@@ -146,21 +143,17 @@ def oracle_proteome(tmp_path) -> Path:
   return path
 
 
-# Each (k, max_mismatches) pair satisfies len >= k*(max_mismatches+1) for every query
-# above, so the pigeonhole seeding guarantees complete recall and the engine's result
-# set must equal the oracle exactly -- no missing hits, no extras.
-@pytest.mark.parametrize('k,max_mismatches', [(3, 1), (3, 2), (4, 1)])
-def test_mismatch_matches_hamming_oracle(oracle_proteome, tmp_path, k, max_mismatches):
-  # Both engine path regimes must be exercised by this query set at this k.
-  regimes = {len(q) % k == 0 for q in ORACLE_QUERIES}
-  assert regimes == {True, False}, f'k={k} does not exercise both mismatch paths'
-  assert all(len(q) >= k * (max_mismatches + 1) for q in ORACLE_QUERIES)
+# Every query above is searched at its own k = len // (max_mismatches + 1), which splits
+# it into max_mismatches + 1 disjoint seeds, so the pigeonhole seeding guarantees complete
+# recall and the engine's result set must equal the oracle exactly: no missing hits, no extras.
+@pytest.mark.parametrize('max_mismatches', [1, 2])
+def test_mismatch_matches_hamming_oracle(oracle_proteome, tmp_path, max_mismatches):
+  assert all(len(q) >= 2 * (max_mismatches + 1) for q in ORACLE_QUERIES)
 
   df = Matcher(
     query=ORACLE_QUERIES,
     proteome_file=str(oracle_proteome),
     max_mismatches=max_mismatches,
-    k=k,
     preprocessed_files_path=str(tmp_path),
     sequence_version=False,
     output_format='dataframe'
@@ -177,16 +170,15 @@ def test_mismatch_matches_hamming_oracle(oracle_proteome, tmp_path, k, max_misma
   assert_rows_sound(df, max_mismatches)
 
 
-@pytest.mark.parametrize('k,max_mismatches', [(3, 1), (3, 2), (4, 1), (3, 3)])
-def test_mismatch_reported_rows_are_self_consistent(oracle_proteome, tmp_path, k, max_mismatches):
-  # Soundness holds regardless of recall: (3, 3) is deliberately below the pigeonhole
-  # threshold for the shortest query, so hits may be missing -- but whatever IS reported
-  # must still line up with the query residue for residue.
+@pytest.mark.parametrize('max_mismatches', [1, 2, 3, 5])
+def test_mismatch_reported_rows_are_self_consistent(oracle_proteome, tmp_path, max_mismatches):
+  # Soundness holds regardless of recall: at 5 mismatches the shortest queries are below
+  # the pigeonhole threshold, so hits may be missing -- but whatever IS reported must
+  # still line up with the query residue for residue.
   df = Matcher(
     query=ORACLE_QUERIES,
     proteome_file=str(oracle_proteome),
     max_mismatches=max_mismatches,
-    k=k,
     preprocessed_files_path=str(tmp_path),
     sequence_version=False,
     output_format='dataframe'
@@ -201,7 +193,6 @@ def test_mismatch_rows_sound_on_reference_proteome(proteome_path, query_path, tm
     query=query_path,
     proteome_file=proteome_path,
     max_mismatches=3,
-    k=3,
     preprocessed_files_path=str(tmp_path),
     output_format='dataframe'
   ).match()
@@ -220,7 +211,6 @@ def test_mismatch_includes_hits_below_the_threshold(tmp_path):
     query=['ACDEFGHIK'],
     proteome_file=str(proteome_path),
     max_mismatches=2,
-    k=3,
     preprocessed_files_path=str(tmp_path),
     sequence_version=False,
     output_format='dataframe'
@@ -238,7 +228,7 @@ def test_mismatch_includes_hits_below_the_threshold(tmp_path):
 def test_mismatch_reports_each_location_once(tmp_path, query):
   # A tandem repeat makes every seed k-mer of the query hit every repeat unit, so one
   # window is reachable from several seeds. Each (Protein ID, Index start) must still be
-  # reported exactly once. Both lengths run at k=3, covering both path regimes (9 % 3 == 0,
+  # reported exactly once. Both lengths run at covering both path regimes (9 % 3 == 0,
   # 10 % 3 != 0) -- the block path and the residue path dedupe independently.
   proteome_path = tmp_path / 'proteome.fasta'
   proteins = {'P1': MISMATCH_PAD + 'ACDACDACDACD' + MISMATCH_PAD}
@@ -248,7 +238,6 @@ def test_mismatch_reports_each_location_once(tmp_path, query):
     query=[query],
     proteome_file=str(proteome_path),
     max_mismatches=1,
-    k=3,
     preprocessed_files_path=str(tmp_path),
     sequence_version=False,
     output_format='dataframe'
@@ -271,7 +260,6 @@ def test_mismatch_miss_row_shape(tmp_path):
     query=['ACDEFGHIK', 'YTYTYTYTY'],
     proteome_file=str(proteome_path),
     max_mismatches=2,
-    k=3,
     preprocessed_files_path=str(tmp_path),
     sequence_version=False,
     output_format='dataframe'
@@ -313,7 +301,6 @@ def test_mismatch_does_not_cross_protein_boundary(tmp_path):
     query=['DEFGHI'],
     proteome_file=str(proteome_path),
     max_mismatches=1,
-    k=3,
     preprocessed_files_path=str(tmp_path),
     sequence_version=False,
     output_format='dataframe'

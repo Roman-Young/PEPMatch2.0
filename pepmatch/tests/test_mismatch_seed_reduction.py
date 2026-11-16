@@ -7,9 +7,9 @@ the n+1, so one always survives inside any match and anchors it. It DOES depend 
 verifying the whole peptide from whatever single seed survives, including an interior one
 chosen for rarity rather than position.
 
-The other mismatch tests use one query length at its optimal k, where there is nothing to
-drop. This test forces the reduction: mixed-length queries searched at a small k so long ones
-carry many tiles, mismatches placed anywhere so the surviving seed is often interior, and
+Matcher searches every query at the largest k its length allows, where there is little to
+drop, so this test also asks the engine directly at small k: mixed-length queries so long
+ones carry many tiles, mismatches placed anywhere so the surviving seed is often interior, and
 repeat-rich proteins so the rarest-seed choice routes around common tiles. It then asserts
 the engine's matches equal an independent brute-force scan, row for row, in both the search
 and the counts-only path.
@@ -24,10 +24,12 @@ from collections import Counter
 
 import pytest
 from pepmatch import Matcher
+from pepmatch._rs import rs_match, rs_match_counts, rs_preprocess
+from pepmatch.matcher import k_for
 
 AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY'
 MISMATCHES = (1, 2, 3)
-KS = (0, 2, 3, 4)   # 0 lets Matcher choose k from the shortest query
+KS = (0, 2, 3, 4)   # 0 searches through Matcher, each query at its own k
 
 
 def _random_sequence(rng, length):
@@ -99,16 +101,50 @@ def _expected(peptide, proteins, max_mismatches, k):
   return reachable
 
 
-def _engine_rows(df):
-  """Reported hits per Query ID, as lists so a row emitted twice is caught."""
+def _search(fasta, tmp_path, queries, max_mismatches, k):
+  """Reported hits per Query ID, as lists so a row emitted twice is caught. k=0 searches
+  through Matcher, each query at its own k; any other k asks the engine directly, since
+  Matcher never searches a query below the k its length allows."""
   rows = {}
-  for row in df.iter_rows(named=True):
-    if row['Matched Sequence'] is not None:
-      rows.setdefault(row['Query ID'], []).append((
-        row['Protein ID'], row['Index start'], row['Matched Sequence'],
-        row['Mismatches'], row['Mutated Positions'],
-      ))
+  if k == 0:
+    df = Matcher(
+      query=queries, proteome_file=str(fasta), max_mismatches=max_mismatches,
+      preprocessed_files_path=str(tmp_path), sequence_version=False,
+    ).match()
+    assert df['Query ID'].cast(int).is_sorted()   # rows come back in query order
+    for row in df.iter_rows(named=True):
+      if row['Matched Sequence'] is not None:
+        rows.setdefault(row['Query ID'], []).append((
+          row['Protein ID'], row['Index start'], row['Matched Sequence'],
+          row['Mismatches'], row['Mutated Positions'],
+        ))
+    return rows
+  index = _engine_index(fasta, tmp_path, k)
+  numbered = [(str(i + 1), q) for i, q in enumerate(queries)]
+  for qid, _, matched, protein, mm, positions, start, _ in zip(*rs_match(index, numbered, k, max_mismatches)):
+    if matched is not None:
+      rows.setdefault(qid, []).append((f'p{protein}', start, matched, mm, positions))   # FASTA ids are p1, p2, ...
   return rows
+
+
+def _counts(fasta, tmp_path, queries, max_mismatches, k):
+  """{(Query ID, mismatches): count}, through Matcher (k=0) or the engine at k."""
+  if k == 0:
+    df = Matcher(
+      query=queries, proteome_file=str(fasta), max_mismatches=max_mismatches,
+      preprocessed_files_path=str(tmp_path), counts_only=True,
+    ).match()
+    return {(row['Query ID'], row['Mismatches']): row['Count'] for row in df.iter_rows(named=True)}
+  numbered = [(str(i + 1), q) for i, q in enumerate(queries)]
+  qid, _, mm, count = rs_match_counts(_engine_index(fasta, tmp_path, k), numbered, k, max_mismatches)
+  return dict(zip(zip(qid, mm), count))
+
+
+def _engine_index(fasta, tmp_path, k):
+  index = tmp_path / f'engine_{k}mers.pepidx'
+  if not index.exists():
+    rs_preprocess(str(fasta), k, str(index))
+  return str(index)
 
 
 def _setup(seed, tmp_path):
@@ -119,8 +155,8 @@ def _setup(seed, tmp_path):
   return proteins, fasta, _queries(rng, proteins)
 
 
-def _effective_k(k, queries, max_mismatches):
-  return k or max(2, min(len(q) for q in queries) // (max_mismatches + 1))
+def _k(k, peptide, max_mismatches):
+  return k or k_for(len(peptide), max_mismatches)
 
 
 @pytest.mark.parametrize('seed', range(8))
@@ -129,13 +165,9 @@ def test_mismatch_search_equals_brute_force(seed, tmp_path):
   compared = dropped = unguaranteed = 0
   for m in MISMATCHES:
     for k in KS:
-      df = Matcher(
-        query=queries, proteome_file=str(fasta), max_mismatches=m, k=k,
-        preprocessed_files_path=str(tmp_path), sequence_version=False,
-      ).match()
-      rows = _engine_rows(df)
-      used_k = _effective_k(k, queries, m)
+      rows = _search(fasta, tmp_path, queries, m, k)
       for i, peptide in enumerate(queries):
+        used_k = _k(k, peptide, m)
         actual = rows.get(str(i + 1), [])
         expected = _expected(peptide, proteins, m, used_k)
         assert len(actual) == len(set(actual)), f'duplicate rows for {peptide} (m={m}, k={used_k})'
@@ -154,13 +186,9 @@ def test_counts_only_equals_brute_force(seed, tmp_path):
   proteins, fasta, queries = _setup(seed, tmp_path)
   for m in MISMATCHES:
     for k in KS:
-      df = Matcher(
-        query=queries, proteome_file=str(fasta), max_mismatches=m, k=k,
-        preprocessed_files_path=str(tmp_path), counts_only=True,
-      ).match()
-      actual = {(row['Query ID'], row['Mismatches']): row['Count'] for row in df.iter_rows(named=True)}
-      used_k = _effective_k(k, queries, m)
+      actual = _counts(fasta, tmp_path, queries, m, k)
       for i, peptide in enumerate(queries):
+        used_k = _k(k, peptide, m)
         expected = Counter(hit[3] for hit in _expected(peptide, proteins, m, used_k))
         got = {level: count for (query_id, level), count in actual.items() if query_id == str(i + 1)}
         assert got == dict(expected), f'{peptide} (m={m}, k={used_k})'
@@ -178,11 +206,8 @@ def test_a_match_never_crosses_into_the_neighbouring_protein(m, tmp_path):
     'QRQISFVKSH',     # p1's last residue + p2's first nine: would start before p2
     'AKQRQISF',       # straddles the boundary in the middle
   ]
-  for k in (2, 3):
-    df = Matcher(
-      query=queries, proteome_file=str(fasta), max_mismatches=m, k=k,
-      preprocessed_files_path=str(tmp_path), sequence_version=False,
-    ).match()
-    rows = _engine_rows(df)
+  for k in (0, 2, 3):
+    rows = _search(fasta, tmp_path, queries, m, k)
     for i, peptide in enumerate(queries):
-      assert set(rows.get(str(i + 1), [])) == _expected(peptide, proteins, m, k), f'{peptide} (m={m}, k={k})'
+      used_k = _k(k, peptide, m)
+      assert set(rows.get(str(i + 1), [])) == _expected(peptide, proteins, m, used_k), f'{peptide} (m={m}, k={used_k})'

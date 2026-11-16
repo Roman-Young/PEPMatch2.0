@@ -2,6 +2,7 @@ import pytest
 import polars as pl
 import polars.testing as plt
 from pathlib import Path
+from pepmatch._rs import rs_match, rs_preprocess
 from pepmatch import Matcher
 
 @pytest.fixture
@@ -21,7 +22,6 @@ def test_exact_match_k5(proteome_path, query_path, expected_path):
     query=query_path,
     proteome_file=proteome_path,
     max_mismatches=0,
-    k=5,
     output_format='dataframe'
   ).match()
 
@@ -34,7 +34,6 @@ def test_exact_match_k9(proteome_path, query_path, expected_path):
     query=query_path,
     proteome_file=proteome_path,
     max_mismatches=0,
-    k=9,
     output_format='dataframe'
   ).match()
 
@@ -165,13 +164,19 @@ def test_every_query_represented_in_mixed_batch(mini_proteome, tmp_path):
     assert counts[query] == max(1, len(brute_force_hits([query]))), query
 
 
-def test_exact_match_invariant_to_k(mini_proteome, tmp_path):
-  # k sizes the seed k-mer, nothing else. Every k valid for these length-6 queries --
-  # and the auto-derived one -- must return an identical match set.
-  expected = brute_force_hits(MINI_QUERIES)
+def test_exact_engine_invariant_to_k(mini_proteome, tmp_path):
+  # k sizes the seed k-mer, nothing else. Matcher always picks k from the query length, so
+  # the engine is asked directly: every k valid for these length-6 queries must return the
+  # same occurrences.
+  queries = [(str(i), seq) for i, seq in enumerate(MINI_QUERIES)]
+  found = {}
   for k in (2, 3, 5, 6):
-    assert reported_hits(run_mini(mini_proteome, tmp_path, k=k)) == expected, k
-  assert reported_hits(run_mini(mini_proteome, tmp_path)) == expected
+    index = tmp_path / f'mini_{k}mers.pepidx'
+    rs_preprocess(str(mini_proteome), k, str(index))
+    _, qseq, matched, pnum, _, _, start, _ = rs_match(str(index), queries, k, 0)
+    found[k] = {(q, p, s) for q, m, p, s in zip(qseq, matched, pnum, start) if m is not None}
+  assert found[2] and found[2] == found[3] == found[5] == found[6]
+  assert reported_hits(run_mini(mini_proteome, tmp_path)) == brute_force_hits(MINI_QUERIES)
 
 
 def test_query_input_forms_agree(mini_proteome, tmp_path):
@@ -195,19 +200,6 @@ def test_lowercase_query_is_upcased_before_searching(mini_proteome, tmp_path):
   assert reported_hits(df) == brute_force_hits(MINI_QUERIES)
   assert set(df['Query Sequence']) == set(MINI_QUERIES)
 
-
-def test_k_below_two_raises(mini_proteome):
-  # k=1 degenerates the index to single residues; rejected up front.
-  with pytest.raises(ValueError, match='k must be >= 2'):
-    Matcher(query=MINI_QUERIES, proteome_file=str(mini_proteome), k=1)
-
-
-def test_k_above_shortest_query_raises(mini_proteome):
-  # A peptide shorter than k has no k-mer seed and would be silently skipped, so the
-  # constructor refuses. k == the shortest peptide is still fine.
-  with pytest.raises(ValueError, match='cannot exceed the shortest query peptide'):
-    Matcher(query=MINI_QUERIES, proteome_file=str(mini_proteome), k=7)
-  Matcher(query=MINI_QUERIES, proteome_file=str(mini_proteome), k=6)
 
 
 def test_missing_query_file_raises(mini_proteome, tmp_path):

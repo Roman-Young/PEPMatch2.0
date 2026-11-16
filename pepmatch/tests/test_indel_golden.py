@@ -17,15 +17,15 @@ from pepmatch import Matcher
 # or relabels rows without changing the set; this does. The last six queries were picked because
 # an engine that pairs budget splits in another order, or dedups hits without the protein, fails
 # on them.
-# Recorded from the engine as of v1.17.2. Regenerate only for a deliberate output change:
+# Re-recorded for per-length k (same rows as the v1.17.2 record; queries now come back in input
+# order and three queries list their hits in another order). Regenerate only for a deliberate
+# output change:
 #   python pepmatch/tests/test_indel_golden.py --write
 DATA = Path(__file__).parent / 'data'
 EXPECTED = DATA / 'indel_golden_expected.csv'
 RUNS = {
   '1 indel': dict(max_indels=1),
   '2 indels': dict(max_indels=2),
-  '1 indel, k=2': dict(max_indels=1, k=2),
-  '2 indels, k=2': dict(max_indels=2, k=2),
 }
 
 

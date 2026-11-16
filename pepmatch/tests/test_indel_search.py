@@ -3,6 +3,7 @@ import polars as pl
 import polars.testing as plt
 from pathlib import Path
 from pepmatch.preprocessor import record_source
+from pepmatch._rs import rs_indel_match, rs_preprocess
 from pepmatch import Matcher, Preprocessor
 from pepmatch.matcher import format_indel_positions
 
@@ -326,41 +327,18 @@ def test_indel_positions_insertion_end_to_end(tmp_path):
   assert row['Indel Positions'].item() == 'i: X[6]'
 
 
-def test_indel_honors_explicit_k_up_to_optimal_and_reuses_table(tmp_path, capsys):
-  # Issue #28: a user who already built a k-mer table (e.g. for a mismatch run) and
-  # passes that same k to indel search should have it reused, not silently swapped
-  # for the optimized k and rebuilt. Query len 10, max_indels=1 -> optimized k = 5;
-  # k=3 <= 5 so it is honored, and the pre-built 3-mer index is used as-is.
+def test_indel_reuses_an_existing_table(tmp_path, capsys):
+  # Query len 10, max_indels=1 -> k = 5. A 5-mer table that already exists is used as it is.
   proteome_path = tmp_path / 'proteome.fasta'
   proteome_path.write_text('>ProtDel\nMKVNALVETRFCGHI\n')
-  # the user "already has" a 3-mer table from an earlier run
-  Matcher(query=['NALVEATRFC'], proteome_file=str(proteome_path), max_mismatches=0,
-          k=3, preprocessed_files_path=str(tmp_path), output_format='dataframe').match()
-  assert (tmp_path / 'proteome_3mers.pepidx').exists()
+  Preprocessor(str(proteome_path), preprocessed_files_path=str(tmp_path)).preprocess(5)
   capsys.readouterr()  # discard the pre-build output
   df = Matcher(query=['NALVEATRFC'], proteome_file=str(proteome_path), max_indels=1,
-               k=3, preprocessed_files_path=str(tmp_path), output_format='dataframe').match()
+               preprocessed_files_path=str(tmp_path), output_format='dataframe').match()
   out = capsys.readouterr().out
-  assert '(k=3,' in out                       # honored the user's k, not the optimal 5
-  assert 'No preprocessed file' not in out    # reused the existing table, no rebuild
-  assert 'NALVETRFC' in df['Matched Sequence'].to_list()  # recall preserved at k=3
-
-
-def test_indel_clamps_k_above_optimal_and_warns(tmp_path, capsys):
-  # An explicit k above the pigeonhole optimal drops below max_indels+1 disjoint
-  # seeds and would forfeit complete recall, so indel search clamps it to the
-  # optimal and warns. Query len 10, max_indels=1 -> optimized k = 5; k=7 (still
-  # <= min_len, so it passes the constructor guard) is clamped down to 5.
-  proteome_path = tmp_path / 'proteome.fasta'
-  proteome_path.write_text('>ProtDel\nMKVNALVETRFCGHI\n')
-  df = Matcher(query=['NALVEATRFC'], proteome_file=str(proteome_path), max_indels=1,
-               k=7, preprocessed_files_path=str(tmp_path), output_format='dataframe').match()
-  out = capsys.readouterr().out
-  assert 'Requested k=7 exceeds k=5' in out    # warned about the clamp
-  assert '(k=5,' in out                        # searched at the clamped optimal
-  assert 'NALVETRFC' in df['Matched Sequence'].to_list()   # recall still complete
-  assert (tmp_path / 'proteome_5mers.pepidx').exists()     # built the optimal index
-  assert not (tmp_path / 'proteome_7mers.pepidx').exists() # never the too-large one
+  assert '(k=5,' in out
+  assert 'No preprocessed file' not in out
+  assert 'NALVETRFC' in df['Matched Sequence'].to_list()
 
 
 def test_indel_unspecified_k_derives_optimal(tmp_path, capsys):
@@ -372,14 +350,6 @@ def test_indel_unspecified_k_derives_optimal(tmp_path, capsys):
   out = capsys.readouterr().out
   assert '(k=5,' in out
   assert (tmp_path / 'proteome_5mers.pepidx').exists()
-
-
-def test_indel_k_exceeding_shortest_query_raises():
-  # The constructor rejects an explicit k larger than the shortest query peptide
-  # (shorter peptides would be silently skipped). The guard is global, so it also
-  # governs indel search -- an explicit k reaching indel_search is always <= min_len.
-  with pytest.raises(ValueError, match='cannot exceed the shortest query peptide'):
-    Matcher(query=['NALVEATRFC'], proteome_file='unused.fasta', max_indels=1, k=11)
 
 
 def test_indel2_partitions_short_and_long_onto_separate_tables(tmp_path, capsys):
@@ -403,38 +373,24 @@ def test_indel2_partitions_short_and_long_onto_separate_tables(tmp_path, capsys)
 
 
 def test_indel2_partition_is_result_invariant(tmp_path):
-  # Partitioning must change speed, not results: the split batch must return exactly
-  # what it returns when everything is forced onto a single 2-mer table (k=2 is <=
-  # every query's optimal, so it stays valid for all of them).
+  # Searching each query at its own k must change speed, not results: the batch must
+  # return exactly what the engine returns with everything on a single 2-mer table (k=2 is
+  # <= every query's own k, so it stays valid for all of them).
   proteome_path = tmp_path / 'proteome.fasta'
   proteome_path.write_text('>P1\nZZYDGYZZ\n>P2\nZZABCDEFGHIKLMZZ\n')
   queries = ['YYADGY', 'ABCDEFGHIKLM']
 
-  def matched_rows(df):
-    m = df.filter(pl.col('Matched Sequence').is_not_null())
-    return set(zip(m['Query Sequence'].to_list(),
-                   m['Protein ID'].to_list(),
-                   m['Matched Sequence'].to_list()))
-
   split = Matcher(query=queries, proteome_file=str(proteome_path), max_indels=2,
                   preprocessed_files_path=str(tmp_path), output_format='dataframe').match()
-  single = Matcher(query=queries, proteome_file=str(proteome_path), max_indels=2, k=2,
-                   preprocessed_files_path=str(tmp_path), output_format='dataframe').match()
-  assert matched_rows(split) == matched_rows(single)
+  m = split.filter(pl.col('Matched Sequence').is_not_null())
+  split_rows = set(zip(m['Query Sequence'], m['Protein ID'], m['Matched Sequence'], m['Index start']))
 
+  single_table = tmp_path / 'single_2mers.pepidx'
+  rs_preprocess(str(proteome_path), 2, str(single_table))
+  _, qseq, matched, protein, _, _, start, _ = rs_indel_match(str(single_table), [(q, q) for q in queries], 2)
+  single_rows = {(q, f'P{p}.1', hit, s) for q, hit, p, s in zip(qseq, matched, protein, start) if hit is not None}
 
-def test_indel2_explicit_k2_uses_single_table(tmp_path, capsys):
-  # An explicit k=2 is the user's deliberate choice for the whole batch: no split,
-  # everything runs on one 2-mer table (one search call, no 4-mer table built).
-  proteome_path = tmp_path / 'proteome.fasta'
-  proteome_path.write_text('>P1\nZZYDGYZZ\n>P2\nZZABCDEFGHIKLMZZ\n')
-  Matcher(query=['YYADGY', 'ABCDEFGHIKLM'], proteome_file=str(proteome_path),
-          max_indels=2, k=2, preprocessed_files_path=str(tmp_path),
-          output_format='dataframe').match()
-  out = capsys.readouterr().out
-  assert (tmp_path / 'proteome_2mers.pepidx').exists()
-  assert not (tmp_path / 'proteome_4mers.pepidx').exists()   # collapsed to one table
-  assert out.count('Searching') == 1                          # a single partition ran
+  assert split_rows and split_rows == single_rows
 
 
 def test_indel2_short_query_warns_but_does_not_reject(tmp_path, capsys):
@@ -511,9 +467,11 @@ def test_indel_batch_returns_what_its_short_and_long_queries_return_separately(t
     return Matcher(query=str(query_path), proteome_file=str(proteome_path), max_indels=max_indels,
                    preprocessed_files_path=str(tmp_path), output_format='dataframe').match()
 
-  batch = search([short[0], long[0], short[1], long[1], long[2]], 'batch')
+  order = [short[0], long[0], short[1], long[1], long[2]]
+  batch = search(order, 'batch')
   separately = pl.concat([search(short, 'short'), search(long, 'long')], how='vertical_relaxed')
-  plt.assert_frame_equal(batch, separately)
+  in_batch_order = pl.concat([separately.filter(pl.col('Query ID') == q) for q in order])   # rows follow the query order
+  plt.assert_frame_equal(batch, in_batch_order)
   assert batch['Matched Sequence'].is_not_null().sum() > 0   # the comparison covered real hits
 
 

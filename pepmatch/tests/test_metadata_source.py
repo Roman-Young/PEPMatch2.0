@@ -58,7 +58,6 @@ def test_specified_k_reads_metadata_from_the_reference_it_searched(references, t
   df = Matcher(
     query=['MKVLAT', 'GGWQMK', 'FFLLNN'],
     proteome_file=str(references),
-    k=6,
     preprocessed_files_path=str(tmp_path),
     output_format='dataframe',
   ).match()

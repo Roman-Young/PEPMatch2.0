@@ -42,7 +42,6 @@ def search(proteome, query):
   return Matcher(
     query=query,
     proteome_file=str(proteome),
-    k=5,
     preprocessed_files_path=str(proteome.parent),
     output_format='dataframe',
   ).match()
@@ -143,6 +142,6 @@ def test_a_protein_the_index_lacks_raises_with_a_rebuild_hint(proteome):
   # Protein numbers are the index's own FASTA ordinals, so a number this index lacks means the
   # hits came from an index built from a different version of the FASTA (best match without k
   # searches several indexes and reads metadata from the last). Fail loudly and say why.
-  matcher = Matcher(query=['MKVLAT'], proteome_file=str(proteome), k=5, preprocessed_files_path=str(proteome.parent))
+  matcher = Matcher(query=['MKVLAT'], proteome_file=str(proteome), preprocessed_files_path=str(proteome.parent))
   with pytest.raises(ValueError, match='protein number 4 .* different versions'):
     matcher._metadata_table(index_of(proteome), [1, 4])

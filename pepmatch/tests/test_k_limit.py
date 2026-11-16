@@ -51,11 +51,6 @@ def test_k_below_the_cap_is_unchanged(tmp_path, proteome, capsys):
   assert '(k=16,' in capsys.readouterr().out
 
 
-def test_explicit_k_above_16_is_rejected(tmp_path, proteome):
-  with pytest.raises(ValueError, match='k must be <= 16'):
-    search(tmp_path, proteome, query=[window(20)], k=17)
-
-
 def test_preprocessor_rejects_k_above_16(tmp_path, proteome):
   with pytest.raises(ValueError, match='k must be <= 16'):
     Preprocessor(str(proteome), preprocessed_files_path=str(tmp_path)).preprocess(17)

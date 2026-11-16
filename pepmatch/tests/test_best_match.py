@@ -1,7 +1,7 @@
 import pytest
 import polars as pl
 from pathlib import Path
-from pepmatch import Matcher
+from pepmatch import Matcher, Preprocessor
 
 @pytest.fixture
 def proteome_path() -> Path:
@@ -139,14 +139,12 @@ def test_best_match_reports_the_minimum_achievable_mismatch_count(tmp_path):
   assert protein[row['Index start'] - 1:row['Index end']] == row['Matched Sequence']
 
 
-def test_best_match_with_explicit_k_still_returns_one_row_per_query(tmp_path):
-  # An explicit k bypasses the ladder for a single search + filter. That shortcut
-  # must honour the same contract: one row per query, hits and misses alike.
+def test_best_match_returns_one_row_per_query_hits_and_misses(tmp_path):
   queries = ['NALVEATRFC', 'NALVEATRFD', 'WWWWWWWWWW']
-  df = run_best_match(tmp_path, LADDER_FASTA, queries, k=5, max_mismatches=1)
+  df = run_best_match(tmp_path, LADDER_FASTA, queries)
 
   assert df.height == len(queries)
-  assert set(df['Query Sequence'].to_list()) == set(queries)
+  assert df['Query Sequence'].to_list() == queries   # in the order given
   assert df.filter(pl.col('Query Sequence') == 'WWWWWWWWWW').row(0, named=True)['Matched Sequence'] is None
 
 
@@ -188,25 +186,21 @@ def tie_break_winner(tmp_path, fasta):
 
 
 def test_tie_break_fewest_mismatches_wins(tmp_path):
-  # Both proteins are reachable in a single k=5/mm=1 search (explicit k, so the
-  # filter -- not the ladder -- is what discards the loser). The 1-off protein is
-  # metadata-superior on every later rung, so only the mismatch rung can save the
-  # exact hit in the (metadata-inferior, unreviewed, PE=5) protein.
+  # A 10-residue peptide is searched with up to 4 mismatches in one round (k=2), so a
+  # 3-off and a 4-off protein are found together and the filter -- not the rounds -- is
+  # what discards the loser. The 4-off protein is metadata-superior on every later rung,
+  # so only the mismatch rung can save the 3-off hit in the (unreviewed, PE=5) protein.
+  four_off, three_off = 'DDDDDNWLVWATWFWDDDDD', 'EEEEENAWVEWTRWCEEEEE'
+  assert (min_hamming(four_off, PEPTIDE), min_hamming(three_off, PEPTIDE)) == (4, 3)
   fasta = (
-    header('P11111', 'Alpha protein', gene='AAA', pe=1) + '\nDDDDDNALVEATRFDDDDDD\n' +
-    header('Q22222', 'Beta protein Fragment', gene='BBB', pe=5, db='tr') + '\nEEEEENALVEATRFCEEEEE\n'
+    header('P11111', 'Alpha protein', gene='AAA', pe=1) + '\n' + four_off + '\n' +
+    header('Q22222', 'Beta protein Fragment', gene='BBB', pe=5, db='tr') + '\n' + three_off + '\n'
   )
-  proteome_path = tmp_path / 'proteome.fasta'
-  proteome_path.write_text(fasta)
-  df = Matcher(
-    query=[PEPTIDE], proteome_file=str(proteome_path), best_match=True,
-    k=5, max_mismatches=1, preprocessed_files_path=str(tmp_path),
-    output_format='dataframe'
-  ).match()
+  df = run_best_match(tmp_path, fasta, [PEPTIDE])
 
   assert df.height == 1
   row = df.row(0, named=True)
-  assert row['Mismatches'] == 0
+  assert row['Mismatches'] == 3
   assert row['Protein ID'] == 'Q22222.1'
 
 
@@ -300,7 +294,7 @@ def test_each_round_is_labeled_from_the_index_that_found_it(tmp_path):
   # later one. Both lie in Alpha only, so neither may be labeled Beta.
   fasta = tmp_path / 'proteome.fasta'
   write_fasta(fasta, [ALPHA, BETA])
-  Matcher(query=['MKTAYIAKQ'], proteome_file=str(fasta), k=9, preprocessed_files_path=str(tmp_path)).match()
+  Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path)).preprocess(9)
   write_fasta(fasta, [BETA, ALPHA])
   # Rewriting the FASTA would rebuild the k=9 index. Without its source record it is kept,
   # since the reordered FASTA has the same protein count and length: the stale index stays.
@@ -320,15 +314,14 @@ DUPLICATE_ID_QUERIES = [
 ]
 
 
-@pytest.mark.parametrize('k', [0, 3])
-def test_records_sharing_a_query_id_each_get_their_own_row(tmp_path, k):
+def test_records_sharing_a_query_id_each_get_their_own_row(tmp_path):
   # FASTA IDs need not be unique. Each record is its own query: one row each, in input order.
   fasta = tmp_path / 'proteome.fasta'
   write_fasta(fasta, [ALPHA, BETA])
   queries = tmp_path / 'queries.fasta'
   write_fasta(queries, [(f'>{qid}', seq) for qid, seq in DUPLICATE_ID_QUERIES])
   df = Matcher(
-    query=str(queries), proteome_file=str(fasta), best_match=True, k=k,
+    query=str(queries), proteome_file=str(fasta), best_match=True,
     preprocessed_files_path=str(tmp_path),
   ).match()
   rows = sorted(zip(df['Query ID'], df['Query Sequence'], df['Matched Sequence'], df['Gene']))

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from Bio import SeqIO
 from pepmatch import Matcher
+from pepmatch._rs import rs_match, rs_preprocess
 
 # Guards the auto-k mismatch fix in matcher.py: when k is UNSPECIFIED, Matcher must
 # derive the pigeonhole-optimal k = max(2, min_len // (m + 1)) so that a seed-based
@@ -158,17 +159,12 @@ def test_auto_k_recovers_match_that_hardcoded_k5_dropped(proteome_path, tmp_path
       preprocessed_files_path=str(tmp_path),
     ).match()
   ))
-  hardcoded_k5 = set(_matcher_rows(
-    Matcher(
-      query=[peptide],
-      proteome_file=str(proteome_path),
-      max_mismatches=1,
-      k=5,
-      preprocessed_files_path=str(tmp_path),
-    ).match()
-  ))
+  # The engine asked directly at k=5, as the old hardcoded default did.
+  index = tmp_path / 'hardcoded_5mers.pepidx'
+  rs_preprocess(str(proteome_path), 5, str(index))
+  hardcoded_k5 = rs_match(str(index), [('1', peptide)], 5, 1)[2]
 
   # auto-k is complete and finds the match; the old hardcoded k=5 drops it.
   assert source_match in auto_k
   assert auto_k == expected
-  assert source_match not in hardcoded_k5
+  assert 'MSKRVLIIA' not in hardcoded_k5

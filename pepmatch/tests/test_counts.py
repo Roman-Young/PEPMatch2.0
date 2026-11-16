@@ -39,18 +39,18 @@ def _from_counts(df: pl.DataFrame) -> pl.DataFrame:
 def test_counts_parity_mismatch(proteome_path, mismatch_query):
   """counts_only must equal the full output grouped by (peptide, mismatch level)."""
   full = Matcher(query=mismatch_query, proteome_file=proteome_path,
-                 max_mismatches=3, k=3).match()
+                 max_mismatches=3).match()
   counts = Matcher(query=mismatch_query, proteome_file=proteome_path,
-                   max_mismatches=3, k=3, counts_only=True).match()
+                   max_mismatches=3, counts_only=True).match()
   assert counts.columns == ['Query ID', 'Query Sequence', 'Mismatches', 'Count']
   plt.assert_frame_equal(_from_full(full), _from_counts(counts))
 
 
 def test_counts_parity_exact(proteome_path, exact_query):
   full = Matcher(query=exact_query, proteome_file=proteome_path,
-                 max_mismatches=0, k=5).match()
+                 max_mismatches=0).match()
   counts = Matcher(query=exact_query, proteome_file=proteome_path,
-                   max_mismatches=0, k=5, counts_only=True).match()
+                   max_mismatches=0, counts_only=True).match()
   plt.assert_frame_equal(_from_full(full), _from_counts(counts))
 
 

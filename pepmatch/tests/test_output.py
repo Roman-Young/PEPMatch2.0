@@ -57,7 +57,6 @@ def test_dataframe_alias_returns_polars(proteome_path, query_path):
   df = Matcher(
     query=str(query_path),
     proteome_file=str(proteome_path),
-    k=5,
     output_format='dataframe',
   ).match()
   assert isinstance(df, pl.DataFrame)
@@ -68,7 +67,6 @@ def test_polars_output_format(proteome_path, query_path):
   df = Matcher(
     query=str(query_path),
     proteome_file=str(proteome_path),
-    k=5,
     output_format='polars',
   ).match()
   assert isinstance(df, pl.DataFrame)
@@ -80,7 +78,6 @@ def test_pandas_output_format(proteome_path, query_path):
   df = Matcher(
     query=str(query_path),
     proteome_file=str(proteome_path),
-    k=5,
     output_format='pandas',
   ).match()
   assert isinstance(df, pd.DataFrame)
@@ -89,7 +86,6 @@ def test_pandas_output_format(proteome_path, query_path):
   pl_df = Matcher(
     query=str(query_path),
     proteome_file=str(proteome_path),
-    k=5,
     output_format='polars',
   ).match()
   assert list(df.columns) == pl_df.columns
@@ -101,7 +97,6 @@ def test_pandas_counts_only(proteome_path, query_path):
   df = Matcher(
     query=str(query_path),
     proteome_file=str(proteome_path),
-    k=5,
     counts_only=True,
     output_format='pandas',
   ).match()
@@ -115,6 +110,5 @@ def test_invalid_output_format_rejected(proteome_path, query_path):
     Matcher(
       query=str(query_path),
       proteome_file=str(proteome_path),
-      k=5,
       output_format='parquet',
     )
