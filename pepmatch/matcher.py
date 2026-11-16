@@ -291,8 +291,7 @@ class Matcher:
   def _set_aside_unsearchable(self):
     """Remove the linear queries that cannot be searched -- empty, containing whitespace, or
     an epitope with a negative position -- and warn about them. They are reported as misses
-    instead of stopping the run, and they take no part in choosing k, so one bad entry in a
-    large file cannot drag every other query down to a small k."""
+    instead of stopping the run."""
     searchable, unsearchable = [], []
     for qid, seq in self.query:
       if (qid, seq) in self._negative_epitopes:

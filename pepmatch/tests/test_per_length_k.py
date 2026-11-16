@@ -8,6 +8,7 @@ import polars as pl
 import polars.testing as plt
 import pytest
 from pepmatch import Matcher
+from pepmatch.benchmarker import Benchmarker
 from pepmatch.matcher import best_match_budgets, k_for
 
 AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY'
@@ -146,3 +147,19 @@ def test_best_match_of_mixed_lengths_finds_each_peptides_fewest_mismatches(tmp_p
       assert found == fewest, query
     else:
       assert found is None or found >= fewest, query
+
+
+@pytest.mark.parametrize('max_mismatches', [0, 2, -1])   # -1 is the benchmark parameters' best match
+def test_the_benchmark_hook_builds_every_index_its_search_reads(tmp_path, monkeypatch, capsys, max_mismatches):
+  # Index builds are timed apart from the search, so none may be left for the search to do,
+  # including for lengths the benchmark parameters do not list.
+  proteins, queries = corpus(7)
+  fasta = write_proteome(tmp_path, proteins)
+  query_file = tmp_path / 'queries.txt'
+  query_file.write_text('\n'.join(queries) + '\n')
+  monkeypatch.chdir(tmp_path)
+  bench = Benchmarker('test', query_file, fasta, lengths=[9], max_mismatches=max_mismatches, method_parameters={})
+  bench.preprocess_proteome()
+  capsys.readouterr()
+  assert len(bench.search()) >= len(queries)
+  assert 'No preprocessed file' not in capsys.readouterr().out
