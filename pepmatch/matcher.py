@@ -3,7 +3,7 @@ import re
 import polars as pl
 from pathlib import Path
 from Bio import SeqIO
-from .preprocessor import MAX_INDEX_K, build_index, built_from, check_index
+from .preprocessor import MAX_INDEX_K, Preprocessor, ready_index
 from ._rs import rs_match, rs_discontinuous, rs_metadata, rs_match_counts, rs_indel_match
 
 VALID_OUTPUT_FORMATS = ['dataframe', 'polars', 'pandas', 'csv', 'tsv', 'xlsx', 'json']
@@ -173,6 +173,30 @@ def best_match_budgets(length):
   return budgets + list(range(m, length + 1))
 
 
+def index_ks(lengths, edits=0, best_match=False):
+  """Every k a search of peptides of these `lengths` reads an index for: one per distinct
+  k_for at `edits` mismatches or indels, or every k best match can step through."""
+  if best_match:
+    return sorted({k_for(length, m) for length in lengths for m in best_match_budgets(length)})
+  return sorted({k_for(length, edits) for length in lengths})
+
+
+def check_search_options(max_mismatches=0, max_indels=0, best_match=False, counts_only=False):
+  """Raise a ValueError for a combination of search options that is not supported."""
+  if max_mismatches < 0 or max_indels < 0:
+    raise ValueError('max_mismatches and max_indels must be >= 0.')
+  if max_indels > 2:
+    raise ValueError('max_indels > 2 is not yet supported. Only max_indels<=2 has been validated.')
+  if max_indels > 0 and max_mismatches > 0:
+    raise ValueError('max_indels and max_mismatches are mutually exclusive.')
+  if max_indels > 0 and best_match:
+    raise ValueError('max_indels and best_match are not yet supported together.')
+  if max_indels > 0 and counts_only:
+    raise ValueError('max_indels and counts_only are not yet supported together.')
+  if counts_only and best_match:
+    raise ValueError('counts_only is not supported with best_match.')
+
+
 class Matcher:
   """Searches query peptides against a preprocessed proteome index
   and returns matches as a DataFrame (Polars by default, or pandas) or output file."""
@@ -192,30 +216,13 @@ class Matcher:
     proteome_name='',
   ):
 
-    if max_mismatches < 0 or max_indels < 0:
-      raise ValueError('max_mismatches and max_indels must be >= 0.')
-
-    if max_indels > 2:
-      raise ValueError('max_indels > 2 is not yet supported. Only max_indels<=2 has been validated.')
-
-    if max_indels > 0 and max_mismatches > 0:
-      raise ValueError('max_indels and max_mismatches are mutually exclusive.')
-
-    if max_indels > 0 and best_match:
-      raise ValueError('max_indels and best_match are not yet supported together.')
-
-    if max_indels > 0 and counts_only:
-      raise ValueError('max_indels and counts_only are not yet supported together.')
-
+    check_search_options(max_mismatches, max_indels, best_match, counts_only)
     self.max_indels = max_indels
 
     if output_format not in VALID_OUTPUT_FORMATS:
       raise ValueError(
         f'Invalid output format. Choose from: {VALID_OUTPUT_FORMATS}'
       )
-
-    if counts_only and best_match:
-      raise ValueError('counts_only is not supported with best_match.')
 
     self.proteome_file = str(proteome_file)
     # A custom name must match the one given to Preprocessor, which names the index files.
@@ -326,6 +333,20 @@ class Matcher:
       return df
     misses = self._miss_rows([(q, s) for q, s, _ in self.unsearchable], self.max_indels > 0)
     return pl.concat([df, misses], how='vertical_relaxed') if df.width else misses
+
+  def index_ks(self):
+    """Every k this search reads an index for (discontinuous epitopes use the 2-mer index)."""
+    lengths = {len(seq) for _, seq in self.query}
+    ks = set(index_ks(lengths, max(self.max_mismatches, self.max_indels), self.best_match))
+    return sorted(ks | {2} if self.discontinuous_epitopes else ks)
+
+  def preprocess(self):
+    """Build every index this search will read, without searching, and return their paths.
+    Indexes that are already there and match the FASTA are kept. match() does the same on
+    first use; this is for building ahead of time."""
+    return Preprocessor(
+      self.proteome_file, self.proteome_name, self.preprocessed_files_path
+    ).preprocess_all(self.index_ks())
 
   def match(self):
     """Run the search, returning a DataFrame or writing the results to `output_name`."""
@@ -439,20 +460,8 @@ class Matcher:
     )
 
   def _index(self, k):
-    """Path of this proteome's k-mer index after checking it is complete, built if it is
-    missing and rebuilt if the FASTA's content changed since (see built_from). An index
-    whose FASTA is gone is used as it is."""
-    path = self._pepidx_path(k)
-    if os.path.isfile(path):
-      check_index(path, k)
-      if not os.path.isfile(self.proteome_file) or built_from(path, self.proteome_file):
-        return path
-      print(f"{self.proteome_file} changed since {path} was built; rebuilding it...")
-    else:
-      print(f"No preprocessed file found for k={k}, building index now (this may take a moment)...")
-    build_index(self.proteome_file, k, path)
-    check_index(path, k)
-    return path
+    """Path of this proteome's k-mer index, ready to search (see ready_index)."""
+    return ready_index(self.proteome_file, self._pepidx_path(k), k)
 
   def _positional_query(self):
     """The query with each peptide's position as its ID. Searches run on positions, since

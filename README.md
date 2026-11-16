@@ -50,24 +50,38 @@ There is no k to choose. Each query peptide is searched at its own k, the larges
 
 ### Preprocessing
 
-Preprocessing is optional: it builds the `.pepidx` index for one k ahead of time, for example to prepare a shared proteome.
+Preprocessing is optional: `Matcher` builds any index it is missing on first use. To build ahead of time (a cluster job, a shared proteome), describe the search and call `preprocess()` instead of `match()`. It builds exactly the indexes that search will read and keeps the ones that are already there.
 ```python
-from pepmatch import Preprocessor
+from pepmatch import Matcher
 
-Preprocessor('human.fasta').preprocess(k=5)
+Matcher(
+  query='peptides.fasta',
+  proteome_file='human.fasta',
+  max_mismatches=2
+).preprocess()
 ```
 
-**CLI:**
+**CLI:** `pepmatch-preprocess` takes the same options as `pepmatch-match`.
 ```bash
-pepmatch-preprocess -p human.fasta -k 5
+pepmatch-preprocess -q peptides.fasta -p human.fasta -m 2
+```
+When the queries are not known yet, give the peptide lengths to prepare for instead of a query file:
+```bash
+pepmatch-preprocess -p human.fasta -l 8-15 -m 2
 ```
 
 #### Flags
 
-* `-p`, `--proteome` (Required): Path to the proteome FASTA file.
-* `-k`, `--kmer_size` (Required): The k-mer size to index, from 2 to 16.
+* `-p`, `--proteome_file` (Required): Path to the proteome FASTA file.
+* `-q`, `--query`: Path to the query file. Required unless `-l` is given.
+* `-l`, `--lengths`: Peptide lengths to prepare for, e.g. `9`, `8-15` or `8-11,15`. Required unless `-q` is given.
+* `-m`, `--max_mismatches`: Maximum number of mismatches the search will allow (default: 0).
+* `-i`, `--max_indels`: Maximum number of indels the search will allow (default: 0).
+* `-b`, `--best_match`: Prepare for best match mode.
 * `-n`, `--proteome_name`: Custom name for the proteome.
 * `-P`, `--preprocessed_files_path`: Directory to save preprocessed files.
+
+A single index for one k can still be built directly with `Preprocessor('human.fasta').preprocess(k=5)`.
 
 ### Matching
 

@@ -133,6 +133,22 @@ def built_from(path, fasta):
   return True
 
 
+def ready_index(fasta, path, k):
+  """`path` once it holds a complete k-mer index of `fasta`'s current content: built if it is
+  missing and rebuilt if the FASTA's content changed since (see built_from). An index whose
+  FASTA is gone is used as it is."""
+  if os.path.isfile(path):
+    check_index(path, k)
+    if not os.path.isfile(fasta) or built_from(path, fasta):
+      return path
+    print(f"{fasta} changed since {path} was built; rebuilding it...")
+  else:
+    print(f"No preprocessed file found for k={k}, building index now (this may take a moment)...")
+  build_index(fasta, k, path)
+  check_index(path, k)
+  return path
+
+
 class Preprocessor:
   """Preprocesses a proteome FASTA file into a .pepidx binary index
   optimized for fast peptide searching. The index stores k-mer positions,
@@ -156,15 +172,31 @@ class Preprocessor:
     else:
       self.proteome_name = proteome_name
 
+  def index_path(self, k):
+    return os.path.join(self.preprocessed_files_path, f'{self.proteome_name}_{k}mers.pepidx')
+
+  def preprocess_all(self, ks):
+    """Make sure the index for every k in `ks` is ready, building only the ones that are
+    missing or older than the FASTA's content, and return their paths."""
+    ks = sorted(set(ks))
+    paths = [ready_index(self.proteome_file, self.index_path(k), k) for k in ks]
+    if paths:
+      size = sum(os.path.getsize(path) for path in paths)
+      size = f'{size / 1e9:.1f} GB' if size >= 1e9 else f'{size / 1e6:.1f} MB'
+      print(f"{self.proteome_name} indexes ready in {self.preprocessed_files_path}: "
+            f"k={', '.join(map(str, ks))} ({len(paths)} file(s), {size})")
+    else:
+      print('No index is needed: there is nothing to search.')
+    return paths
+
   def preprocess(self, k: int) -> None:
-    """Build the k-mer index and write it to <proteome_name>_<k>mers.pepidx."""
+    """Build the k-mer index and write it to <proteome_name>_<k>mers.pepidx, replacing any
+    index already there."""
     if k < 2:
       raise ValueError('k must be >= 2.')
     if k > MAX_INDEX_K:
       raise ValueError(f'k must be <= {MAX_INDEX_K}, the longest k-mer the index can store.')
-    output_path = os.path.join(
-      self.preprocessed_files_path, f'{self.proteome_name}_{k}mers.pepidx'
-    )
+    output_path = self.index_path(k)
     print(f"Preprocessing {self.proteome_name} with k={k}...")
     build_index(self.proteome_file, k, output_path)
     print(f"Saved to {output_path}")

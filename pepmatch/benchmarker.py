@@ -1,5 +1,5 @@
 from .preprocessor import Preprocessor
-from .matcher import Matcher, best_match_budgets, k_for
+from .matcher import Matcher
 
 class Benchmarker:
   def __init__(self, benchmark, query, proteome, lengths, max_mismatches, method_parameters):
@@ -15,16 +15,11 @@ class Benchmarker:
       sequence_version=False
     )
 
-  def index_ks(self):
-    """Every k the search reads an index for, from the lengths actually in the query file
-    (`lengths` in the benchmark parameters may leave some out)."""
-    lengths = {len(seq) for _, seq in self.matcher.query}
-    if self.best_match:
-      return sorted({k_for(length, m) for length in lengths for m in best_match_budgets(length)})
-    return sorted({k_for(length, self.mm) for length in lengths})
-
   def preprocess_proteome(self):
-    for k in self.index_ks():
+    """Builds every index the search reads, from the lengths actually in the query file
+    (`lengths` in the benchmark parameters may leave some out). Always rebuilds, so the
+    benchmark times the build."""
+    for k in self.matcher.index_ks():
       Preprocessor(self.proteome).preprocess(k=k)
 
   def preprocess_query(self):
