@@ -151,6 +151,28 @@ def format_indel_positions(query, matched):
   )
 
 
+def k_for(length, edits):
+  """The k a peptide of `length` is searched at with `edits` mismatches or indels: the
+  largest that still splits it into edits + 1 disjoint k-mers, so at least one of them is
+  untouched in any match (pigeonhole) and recall is complete. Floored at 2, the smallest
+  index, where a peptide shorter than 2 * (edits + 1) loses that guarantee, and capped at
+  MAX_INDEX_K, the longest k-mer an index can store (a smaller k only adds seeds)."""
+  return min(MAX_INDEX_K, max(2, length // (edits + 1)))
+
+
+def best_match_budgets(length):
+  """The mismatch budgets best match tries for a peptide of `length`, in order. While the
+  recall guarantee holds, each k the peptide can use is searched once, at the largest
+  budget that k guarantees; past it, one more mismatch at a time."""
+  budgets = []
+  m = 0
+  while length >= 2 * (m + 1):
+    m = length // k_for(length, m) - 1
+    budgets.append(m)
+    m += 1
+  return budgets + list(range(m, length + 1))
+
+
 class Matcher:
   """Searches query peptides against a preprocessed proteome index
   and returns matches as a DataFrame (Polars by default, or pandas) or output file."""
@@ -161,7 +183,6 @@ class Matcher:
     proteome_file,
     max_mismatches=0,
     max_indels=0,
-    k=0,
     preprocessed_files_path='.',
     best_match=False,
     output_format='dataframe',
@@ -170,19 +191,6 @@ class Matcher:
     counts_only=False,
     proteome_name='',
   ):
-
-    if k == 0:
-      self.k = 0
-      self.k_specified = False
-    else:
-      self.k = k
-      self.k_specified = True
-
-    if k != 0 and k < 2:
-      raise ValueError('k must be >= 2.')
-
-    if k > MAX_INDEX_K:
-      raise ValueError(f'k must be <= {MAX_INDEX_K}, the longest k-mer the index can store.')
 
     if max_mismatches < 0 or max_indels < 0:
       raise ValueError('max_mismatches and max_indels must be >= 0.')
@@ -228,14 +236,6 @@ class Matcher:
     self.unsearchable = self._set_aside_unsearchable()
     if not self.query and not self.discontinuous_epitopes and not self.unsearchable:
       raise ValueError('Query is empty.')
-
-    if self.k_specified and self.query:
-      shortest = min(len(seq) for _, seq in self.query)
-      if self.k > shortest:
-        raise ValueError(
-          f'k ({self.k}) cannot exceed the shortest query peptide length ({shortest}); '
-          f'shorter peptides would be silently skipped.'
-        )
 
   def _parse_query(self, query):
     """Normalize the query into (id, sequence) pairs from a list, .txt file, or FASTA."""
@@ -310,20 +310,23 @@ class Matcher:
     self.query = searchable
     return unsearchable
 
-  def _add_unsearchable_misses(self, df):
-    """`df` with a miss row for each query _set_aside_unsearchable removed."""
-    if not self.unsearchable:
-      return df
-    is_indels = self.max_indels > 0
-    if not df.width:
-      df = self._to_dataframe(tuple([] for _ in range(8)), None, is_indels)
+  def _miss_rows(self, queries, is_indels=False):
+    """A results frame of miss rows for (id, sequence) `queries`, as the engine reports them."""
+    empty = self._to_dataframe(tuple([] for _ in range(8)), None, is_indels)
     misses = pl.DataFrame(
-      {'Query ID': [q for q, _, _ in self.unsearchable], 'Query Sequence': [s for _, s, _ in self.unsearchable]},
+      {'Query ID': [q for q, _ in queries], 'Query Sequence': [s for _, s in queries]},
       schema={'Query ID': pl.Utf8, 'Query Sequence': pl.Utf8},
     )
     if not is_indels:
       misses = misses.with_columns(pl.lit('[]').alias('Mutated Positions'))
-    return pl.concat([df, misses], how='diagonal_relaxed').select(df.columns)
+    return pl.concat([empty, misses], how='diagonal_relaxed').select(empty.columns)
+
+  def _add_unsearchable_misses(self, df):
+    """`df` with a miss row for each query _set_aside_unsearchable removed."""
+    if not self.unsearchable:
+      return df
+    misses = self._miss_rows([(q, s) for q, s, _ in self.unsearchable], self.max_indels > 0)
+    return pl.concat([df, misses], how='vertical_relaxed') if df.width else misses
 
   def match(self):
     """Run the search, returning a DataFrame or writing the results to `output_name`."""
@@ -331,25 +334,10 @@ class Matcher:
     discontinuous_df = pl.DataFrame()
 
     if self.counts_only:
-      if not self.query:   # counts are kept only for linear peptides with hits
-        return self._finish(self._counts_to_dataframe(([], [], [], [])))
-      k = self.k if self.k_specified else self._auto_k(self.max_mismatches)
-      self._recall_warning(k, self.max_mismatches)
-      return self._finish(self._counts_to_dataframe(self._search_counts(k, self.max_mismatches)))
+      return self._finish(self._count())
 
     if self.query:
-      if self.max_indels > 0:
-        linear_df = self.indel_search()
-      elif self.best_match and self.k_specified:
-        results, pepidx_path = self._search(self.k, self.max_mismatches, self._positional_query())
-        linear_df = self._restore_query_ids(self._best_match_filter(self._to_dataframe(results, pepidx_path)))
-      elif self.best_match:
-        linear_df = self.best_match_search()
-      else:
-        k = self.k if self.k_specified else self._auto_k(self.max_mismatches)
-        self._recall_warning(k, self.max_mismatches)
-        results, pepidx_path = self._search(k, self.max_mismatches)
-        linear_df = self._to_dataframe(results, pepidx_path)
+      linear_df = self.best_match_search() if self.best_match else self._search()
     linear_df = self._add_unsearchable_misses(linear_df)
 
     if self.discontinuous_epitopes:
@@ -370,69 +358,81 @@ class Matcher:
       return _return_dataframe(df, self.output_format)
     output_matches(df, self.output_format, self.output_name)
 
-  def indel_search(self):
-    """Indel search, partitioned by the k each group of queries needs.
-
-    max_indels=2 is homogeneous: two insertions or two deletions, never one of each.
-    Queries too short for k=3 run against a 2-mer table on their own rather than
-    dragging the whole batch down to k=2, where 2-mer seeds explode. Every group still
-    runs at k <= its own pigeonhole optimum, so the match set equals a single-k run.
-    Each group's hits are labeled from the index that found them: protein numbers are
-    that index's own FASTA ordinals, so labeling them from another group's index would
-    name the wrong protein whenever the two were built from different versions of the
-    proteome. vertical_relaxed lets an all-miss group's null column stack under another
-    group's String column, and the text columns are cast to String at the end so a batch
-    that hits nothing has the same schema as one that does."""
-    n = self.max_indels
-    short = [(q, s) for q, s in self.query if len(s) // (n + 1) < 3]
-    rest = [(q, s) for q, s in self.query if len(s) // (n + 1) >= 3]
-
+  def _groups(self, queries, edits):
+    """`queries` split by the k each is searched at, smallest k first."""
     groups = {}
-    if short:
-      groups.setdefault(self._clamp_k(2), []).extend(short)
-    if rest:
-      rest_optimal = min(MAX_INDEX_K, max(2, min(len(s) for _, s in rest) // (n + 1)))
-      groups.setdefault(self._clamp_k(rest_optimal), []).extend(rest)
+    for query in queries:
+      groups.setdefault(k_for(len(query[1]), edits), []).append(query)
+    return sorted(groups.items())
 
+  def _search_groups(self, queries, edits, is_indels=False):
+    """Search each peptide at its own k and return one results frame per k. Each frame is
+    labeled from the index that found its hits: protein numbers are that index's own FASTA
+    ordinals, so another group's index could name the wrong protein."""
     frames = []
-    for k, queries in sorted(groups.items()):
-      self._recall_warning(k, n, queries)
+    for k, group in self._groups(queries, edits):
       pepidx_path = self._index(k)
-      print(f"Searching {len(queries)} peptides against {self.proteome_name} "
-            f"(k={k}, max_indels={n})...")
-      results = rs_indel_match(pepidx_path, queries, n)
-      frames.append(self._to_dataframe(results, pepidx_path, is_indels=True))
+      print(f"Searching {len(group)} peptides against {self.proteome_name} "
+            f"(k={k}, {'max_indels' if is_indels else 'max_mismatches'}={edits})...")
+      if is_indels:
+        results = rs_indel_match(pepidx_path, group, edits)
+      else:
+        results = rs_match(pepidx_path, group, k, edits)
+      frames.append(self._to_dataframe(results, pepidx_path, is_indels))
+    return frames
+
+  def _in_query_order(self, frames):
+    """The groups' frames as one, rows in the order the queries were given. Query IDs are
+    still positions. vertical_relaxed lets an all-miss group's null columns stack under
+    another group's String columns."""
     df = pl.concat(frames, how='vertical_relaxed')
-    return df.with_columns(pl.col('Matched Sequence', 'Indel Positions').cast(pl.Utf8))
+    if len(frames) > 1:
+      df = df.sort(pl.col('Query ID').cast(pl.Int64), maintain_order=True)
+    return df
 
-  def _clamp_k(self, optimal):
-    """Resolve k for one query group: an explicit k is honored up to `optimal`, above
-    which too few disjoint seeds remain to guarantee recall, so it is clamped down."""
-    if self.k_specified and self.k > optimal:
-      print(f"Requested k={self.k} exceeds k={optimal}, the largest k that "
-            f"guarantees complete recall for these queries (pigeonhole); "
-            f"using k={optimal}.")
-      return optimal
-    return self.k if self.k_specified else optimal
+  def _with_query_ids(self, df):
+    """`df` with the positional Query IDs replaced by the real ones."""
+    ids = {str(i): qid for i, (qid, _) in enumerate(self.query)}
+    return df.with_columns(pl.col('Query ID').replace_strict(ids, return_dtype=pl.Utf8))
 
-  def _recall_warning(self, k, edits, queries=None):
-    """Warn where k cannot guarantee complete recall. The seed guarantee needs
-    len >= k * (edits + 1), so a shorter peptide may have a real match that every seed
-    misses. Shared by the mismatch and indel paths, the latter passing its own group."""
-    queries = self.query if queries is None else queries
-    unguaranteed = sorted({len(s) for _, s in queries if len(s) < k * (edits + 1)})
+  def _search(self):
+    """Mismatch or indel search of every linear query, each at its own k.
+
+    max_indels=2 is homogeneous: two insertions or two deletions, never one of each. The
+    text columns are cast to String so an indel batch that hits nothing has the same schema
+    as one that does."""
+    is_indels = self.max_indels > 0
+    edits = self.max_indels if is_indels else self.max_mismatches
+    self._recall_warning(edits)
+    df = self._with_query_ids(self._in_query_order(self._search_groups(self._positional_query(), edits, is_indels)))
+    if is_indels:
+      df = df.with_columns(pl.col('Matched Sequence', 'Indel Positions').cast(pl.Utf8))
+    return df
+
+  def _count(self):
+    """Hits per (peptide, mismatch level), each peptide counted at its own k. One row per
+    level with a hit; memory is O(unique queries), independent of the number of hits."""
+    schema = {'Query ID': pl.Utf8, 'Query Sequence': pl.Utf8, 'Mismatches': pl.Int64, 'Count': pl.UInt64}
+    if not self.query:   # counts are kept only for linear peptides
+      return pl.DataFrame(schema=schema)
+    edits = self.max_mismatches
+    self._recall_warning(edits)
+    frames = []
+    for k, group in self._groups(self._positional_query(), edits):
+      pepidx_path = self._index(k)
+      print(f"Counting {len(group)} peptides against {self.proteome_name} (k={k}, max_mismatches={edits})...")
+      qid, qseq, mm, count = rs_match_counts(pepidx_path, group, k, edits)
+      frames.append(pl.DataFrame({'Query ID': qid, 'Query Sequence': qseq, 'Mismatches': mm, 'Count': count}, schema=schema))
+    return self._with_query_ids(self._in_query_order(frames))
+
+  def _recall_warning(self, edits):
+    """Warn about peptides too short for the seed guarantee: below 2 * (edits + 1) residues
+    there are not edits + 1 disjoint 2-mers, so a real match may have an edit in every seed."""
+    unguaranteed = sorted({len(s) for _, s in self.query if len(s) < 2 * (edits + 1)})
     if unguaranteed:
-      print(f"k={k}, edits={edits}: complete recall is not guaranteed for query "
-            f"peptides shorter than {k * (edits + 1)} residues (lengths: {unguaranteed}); "
-            f"a match may exist but be missed.")
-
-  def _auto_k(self, edits):
-    """Largest k that still guarantees recall (pigeonhole): floor(L / (edits + 1)) taken
-    on the shortest query peptide, so every peptide splits into edits+1 disjoint seeds.
-    Floored at 2, the preprocessor minimum, and capped at MAX_INDEX_K, the longest k-mer the
-    index can store: a smaller k only adds seeds, so recall still holds."""
-    min_len = min(len(seq) for _, seq in self.query)
-    return min(MAX_INDEX_K, max(2, min_len // (edits + 1)))
+      print(f"edits={edits}: complete recall is not guaranteed for query peptides shorter "
+            f"than {2 * (edits + 1)} residues (lengths: {unguaranteed}); a match may exist "
+            f"but be missed.")
 
   def _pepidx_path(self, k):
     return os.path.join(
@@ -455,103 +455,39 @@ class Matcher:
     check_index(path, k)
     return path
 
-  def _search(self, k, max_mismatches, peptides=None):
-    """Search `peptides` (default: the whole query) at k, building the index if absent.
-    Returns the hit columns and the .pepidx they came from, so the metadata join reads
-    the index this search used rather than rediscovering one by name."""
-    pepidx_path = self._index(k)
-    query = peptides or self.query
-    print(f"Searching {len(query)} peptides against {self.proteome_name} (k={k}, max_mismatches={max_mismatches})...")
-    return rs_match(pepidx_path, query, k, max_mismatches), pepidx_path
-
-  def _search_counts(self, k, max_mismatches):
-    """Count hits per (peptide, mismatch level) at k, building the index if absent."""
-    pepidx_path = self._index(k)
-    print(f"Counting {len(self.query)} peptides against {self.proteome_name} (k={k}, max_mismatches={max_mismatches})...")
-    return rs_match_counts(pepidx_path, self.query, k, max_mismatches)
-
-  def _counts_to_dataframe(self, cols):
-    """Aggregate counts: one row per (query peptide, mismatch level) with a hit.
-    Memory is O(unique queries), independent of total hit count."""
-    qid, qseq, mm, count = cols
-    if not qid:
-      return pl.DataFrame(schema={
-        'Query ID': pl.Utf8, 'Query Sequence': pl.Utf8,
-        'Mismatches': pl.Int64, 'Count': pl.UInt64,
-      })
-    return pl.DataFrame({
-      'Query ID': qid,
-      'Query Sequence': qseq,
-      'Mismatches': pl.Series(mm, dtype=pl.Int64),
-      'Count': pl.Series(count, dtype=pl.UInt64),
-    })
-
   def _positional_query(self):
-    """The query with each peptide's position as its ID. Best match tracks and groups
-    peptides by ID, and FASTA IDs need not be unique, so it works on positions and
-    _restore_query_ids puts the real IDs back at the end."""
+    """The query with each peptide's position as its ID. Searches run on positions, since
+    FASTA IDs need not be unique, and _with_query_ids puts the real IDs back."""
     return [(str(i), seq) for i, (_, seq) in enumerate(self.query)]
 
-  def _restore_query_ids(self, df):
-    ids = {str(i): qid for i, (qid, _) in enumerate(self.query)}
-    return df.with_columns(pl.col('Query ID').replace_strict(ids, return_dtype=pl.Utf8))
-
   def best_match_search(self):
-    """Closest match per peptide, walking k down and the mismatch budget up until
-    nothing is left unmatched. Each round's hits are labeled from the index that round
-    searched: protein numbers are that index's own FASTA ordinals."""
-    peptides_remaining = self._positional_query()
+    """Closest match per peptide: each is searched with a growing mismatch budget (see
+    best_match_budgets), at the k that budget allows, until it has a hit. A round searches
+    every peptide still unmatched, so peptides of one length and budget share a search."""
+    remaining = self._positional_query()
+    budgets = {qid: best_match_budgets(len(seq)) for qid, seq in remaining}
     frames = []
-    pepidx_path = None
-
-    def collect_matched(cols, pepidx_path):
-      hits = self._to_dataframe(cols, pepidx_path).filter(pl.col('Matched Sequence').is_not_null())
-      frames.append(hits)
-      return set(hits['Query ID'])
-
-    initial_k = min(MAX_INDEX_K, min(len(seq) for _, seq in peptides_remaining))
-    ks = [initial_k]
-    while initial_k > 2:
-      initial_k //= 2
-      ks.append(max(initial_k, 2))
-    ks = sorted(set(ks), reverse=True)
-
-    for k in ks:
-      if not peptides_remaining:
-        break
-      min_len = min(len(seq) for _, seq in peptides_remaining)
-      max_mm = (min_len // k) - 1
-      if max_mm < 0:
-        max_mm = 0
-      results, pepidx_path = self._search(k, max_mm, peptides_remaining)
-      matched_ids = collect_matched(results, pepidx_path)
-      peptides_remaining = [
-        (qid, seq) for qid, seq in peptides_remaining if qid not in matched_ids
-      ]
-      print(f"  -> k={k}, mismatches<={max_mm}: {len(peptides_remaining)} remaining")
-
-    if peptides_remaining:
-      max_mm = min(len(seq) for _, seq in peptides_remaining) // 2
-      while peptides_remaining:
-        shortest_len = min(len(seq) for _, seq in peptides_remaining)
-        if max_mm >= shortest_len:
-          break
-        max_mm += 1
-        results, pepidx_path = self._search(2, max_mm, peptides_remaining)
-        matched_ids = collect_matched(results, pepidx_path)
-        peptides_remaining = [
-          (qid, seq) for qid, seq in peptides_remaining if qid not in matched_ids
-        ]
-        print(f"  -> k=2, mismatches<={max_mm}: {len(peptides_remaining)} remaining")
-
-    if peptides_remaining:   # leftover unmatched
-      n = len(peptides_remaining)
-      misses = ([q for q, _ in peptides_remaining], [s for _, s in peptides_remaining],
-                [None] * n, [None] * n, [None] * n, ['[]'] * n, [None] * n, [None] * n)
-      frames.append(self._to_dataframe(misses, pepidx_path))
-
-    df = pl.concat(frames, how='vertical_relaxed')
-    return self._restore_query_ids(self._best_match_filter(df))
+    round_number = 0
+    while remaining:
+      by_budget, exhausted = {}, []
+      for qid, seq in remaining:
+        if round_number < len(budgets[qid]):
+          by_budget.setdefault(budgets[qid][round_number], []).append((qid, seq))
+        else:
+          exhausted.append((qid, seq))
+      matched = set()
+      for max_mm, peptides in sorted(by_budget.items()):
+        for frame in self._search_groups(peptides, max_mm):
+          hits = frame.filter(pl.col('Matched Sequence').is_not_null())
+          frames.append(hits)
+          matched.update(hits['Query ID'])
+      if exhausted:   # no budget left: reported as misses
+        frames.append(self._miss_rows(exhausted))
+      remaining = [(qid, seq) for qid, seq in remaining if qid not in matched and round_number < len(budgets[qid])]
+      print(f"  -> round {round_number + 1}: {len(remaining)} remaining")
+      round_number += 1
+    best = self._best_match_filter(pl.concat(frames, how='vertical_relaxed'))
+    return self._with_query_ids(best.sort(pl.col('Query ID').cast(pl.Int64)))
 
   def _best_match_filter(self, df):
     """Keep one row per query, breaking ties in order: fewest mismatches, gene priority,

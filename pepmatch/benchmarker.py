@@ -1,39 +1,23 @@
 from .preprocessor import Preprocessor
-from .matcher import Matcher
+from .matcher import Matcher, best_match_budgets, k_for
 
 class Benchmarker:
   def __init__(self, benchmark, query, proteome, lengths, max_mismatches, method_parameters):
     self.query = str(query)
     self.proteome = str(proteome)
     self.lengths = lengths
-    self.max_mismatches = max_mismatches
+    self.best_match = max_mismatches == -1   # the benchmark parameters' code for best match
+    self.mm = 0 if self.best_match else max_mismatches
 
-    if max_mismatches == -1:
-      self.best_match = True
-      self.mm = 0
-      self.k = 0
-    elif max_mismatches == 0:
-      self.best_match = False
-      self.mm = 0
-      self.k = min(lengths)
-    else:
-      self.best_match = False
-      self.mm = max_mismatches
-      if benchmark == 'coronavirus':
-        self.k = 2
-      elif benchmark == 'neoepitopes':
-        self.k = 3
-      else:
-        self.k = min(lengths) // (max_mismatches + 1)
-        if self.k < 2:
-          self.k = 2
+  def index_ks(self):
+    """Every k the search will read an index for: each query length at its own k."""
+    if self.best_match:
+      return sorted({k_for(length, m) for length in self.lengths for m in best_match_budgets(length)})
+    return sorted({k_for(length, self.mm) for length in self.lengths})
 
   def preprocess_proteome(self):
-    if self.best_match:
-      for k in [15, 7, 3, 2]:
-        Preprocessor(self.proteome).preprocess(k=k)
-    else:
-      Preprocessor(self.proteome).preprocess(k=self.k)
+    for k in self.index_ks():
+      Preprocessor(self.proteome).preprocess(k=k)
 
   def preprocess_query(self):
     raise TypeError('PEPMatch does not preprocess queries.')
@@ -43,7 +27,6 @@ class Benchmarker:
       query=self.query,
       proteome_file=self.proteome,
       max_mismatches=self.mm,
-      k=self.k,
       best_match=self.best_match,
       output_format='dataframe',
       sequence_version=False

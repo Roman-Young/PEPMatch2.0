@@ -34,23 +34,23 @@ pip install pepmatch
 ```python
 from pepmatch import Preprocessor, Matcher
 
-# Preprocess a proteome (one-time step)
-Preprocessor('human.fasta').preprocess(k=5)
-
 # Search for exact matches
 df = Matcher(
   query=['YLLDLHSYL', 'GLCTLVAML', 'FAKEPEPTIDE'],
   proteome_file='human.fasta',
-  max_mismatches=0,
-  k=5
+  max_mismatches=0
 ).match()
 
 print(df)
 ```
 
+### K-mer size
+
+There is no k to choose. Each query peptide is searched at its own k, the largest that still guarantees complete recall for its length and edit budget: `length // (mismatches + 1)`, between 2 and 16. A batch of mixed lengths is split by k, so a short peptide never slows down a long one, and the results come back in the order the queries were given. `Matcher` builds a `.pepidx` index for each k it needs the first time and reuses it afterwards.
+
 ### Preprocessing
 
-Preprocessing builds a `.pepidx` index from your proteome FASTA file. This only needs to be done once per proteome and k-mer size. If a `.pepidx` file doesn't exist when you search, `Matcher` will create it automatically.
+Preprocessing is optional: it builds the `.pepidx` index for one k ahead of time, for example to prepare a shared proteome.
 ```python
 from pepmatch import Preprocessor
 
@@ -65,7 +65,7 @@ pepmatch-preprocess -p human.fasta -k 5
 #### Flags
 
 * `-p`, `--proteome` (Required): Path to the proteome FASTA file.
-* `-k`, `--kmer_size` (Required): The k-mer size for indexing, from 2 to 16.
+* `-k`, `--kmer_size` (Required): The k-mer size to index, from 2 to 16.
 * `-n`, `--proteome_name`: Custom name for the proteome.
 * `-P`, `--preprocessed_files_path`: Directory to save preprocessed files.
 
@@ -78,8 +78,7 @@ from pepmatch import Matcher
 df = Matcher(
   query='peptides.fasta',
   proteome_file='human.fasta',
-  max_mismatches=0,
-  k=5
+  max_mismatches=0
 ).match()
 ```
 
@@ -88,14 +87,13 @@ df = Matcher(
 df = Matcher(
   query='neoepitopes.fasta',
   proteome_file='human.fasta',
-  max_mismatches=3,
-  k=3
+  max_mismatches=3
 ).match()
 ```
 
 #### Indel Searching
 
-Search allowing insertions and deletions (indels) instead of substitution mismatches. The k-mer size is chosen automatically from your query lengths — no manual preprocessing needed.
+Search allowing insertions and deletions (indels) instead of substitution mismatches.
 ```python
 df = Matcher(
   query='neoepitopes.fasta',
@@ -155,7 +153,6 @@ df = Matcher(
   query='peptides.fasta',
   proteome_file='human.fasta',
   max_mismatches=2,
-  k=3,
   counts_only=True
 ).match()
 ```
@@ -169,7 +166,7 @@ Returns columns `Query ID`, `Query Sequence`, `Mismatches`, and `Count` — one 
 
 **CLI:**
 ```bash
-pepmatch-match -q peptides.fasta -p human.fasta -m 0 -k 5
+pepmatch-match -q peptides.fasta -p human.fasta -m 0
 ```
 
 #### Flags
@@ -178,7 +175,6 @@ pepmatch-match -q peptides.fasta -p human.fasta -m 0 -k 5
 * `-p`, `--proteome_file` (Required): Path to the proteome FASTA file.
 * `-m`, `--max_mismatches`: Maximum mismatches allowed (default: 0).
 * `-i`, `--max_indels`: Maximum indels allowed (default: 0). Supports 1 or 2, and mutually exclusive with `-m`. At 2, a match uses two insertions or two deletions, never one of each.
-* `-k`, `--kmer_size`: K-mer size, from 2 to 16 (default: chosen from the query lengths, the largest that guarantees complete recall, up to 16).
 * `-P`, `--preprocessed_files_path`: Directory containing preprocessed files.
 * `-b`, `--best_match`: Enable best match mode.
 * `-f`, `--output_format`: Output format — `csv`, `tsv`, `xlsx`, `json` (default: `csv`).
@@ -209,10 +205,10 @@ Benchmarked searching ~2,000 peptides against the human proteome (~200,000 prote
 
 | Mode | Time |
 |------|------|
-| Exact match (k=5) | ~0.06s |
-| 1 mismatch (k=3) | ~1.5s |
-| 2 mismatches (k=3) | ~1.9s |
-| 3 mismatches (k=3) | ~3.7s |
+| Exact match | ~0.06s |
+| 1 mismatch | ~1.5s |
+| 2 mismatches | ~1.9s |
+| 3 mismatches | ~3.7s |
 
 ### Citation
 
