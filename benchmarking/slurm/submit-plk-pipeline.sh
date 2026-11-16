@@ -10,7 +10,7 @@
 # Usage (from the repo root, on branch bench/per-length-k, after `git fetch origin`):
 #     SMOKE=1 bash benchmarking/slurm/submit-plk-pipeline.sh    # FIRST: minutes, tiny sizes
 #     bash benchmarking/slurm/submit-plk-pipeline.sh            # the real run
-# Env overrides: BASE_COMMIT, HEAD_COMMIT, CAPS (default "5 6 7 8 16"), THREADS (default "64,8"),
+# Env overrides: BASE_COMMIT, HEAD_COMMIT, CAPS (default "4 5 6 7 8 10 16"), THREADS (default "64,8"),
 #                EXTRA (more script flags, e.g. EXTRA="--sets mixed,coronavirus --modes mm2").
 set -euo pipefail
 
@@ -20,7 +20,7 @@ LOGS="$BASE/slurm-logs"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 export BASE_COMMIT="${BASE_COMMIT:-172207f}"
 export HEAD_COMMIT="${HEAD_COMMIT:-95f857b}"
-export CAPS="${CAPS:-5 6 7 8 16}"
+export CAPS="${CAPS:-4 5 6 7 8 10 16}"
 if [[ "${SMOKE:-0}" == "1" ]]; then
   export RUN_DIR="$BASE/results/per-length-k-smoke-$STAMP"
   export EXTRA="--smoke ${EXTRA:-}"

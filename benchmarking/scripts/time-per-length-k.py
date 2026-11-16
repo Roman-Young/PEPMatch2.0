@@ -12,7 +12,11 @@ Query sets:
   the four benchmark sets on their own proteomes (mhc-ligands, neoepitopes, milk-peptides on
   human; coronavirus on betacoronaviruses)
   synthetic sets cut from the human proteome (fixed seed; half carry 1-2 substitutions):
-    mixed-N    lengths uniform over 8-25, for N in --sizes
+    mixed-N    lengths uniform over 8-25, for N in --sizes (100 queries to 100,000: a small
+               batch pays per-group overhead, a large one shows throughput)
+  and at --fixed-size queries each:
+    short-N    lengths uniform over 5-12 (the floor of the k rule; some lengths fall below
+               the recall guarantee at 3 mismatches, in every variant alike)
     outlier-N  15-mers with 0.1% 8-mers (the short query that drags a one-k batch down)
     long-N     lengths uniform over 30-50 (where a ceiling on k matters most)
     only9-N, only15-N  single-length controls
@@ -21,8 +25,10 @@ Modes: exact, 1-3 mismatches, 1-2 indels, best match (best match only up to --be
 Per config and variant, two processes:
   cold  empty index folder, one search: total time, time inside the index builder, which
         indexes were built and their size on disk. This is what a first use costs.
-  warm  the same folder: one untimed search, then --repeats timed ones (median reported),
-        peak memory, and a checksum of the result rows.
+  warm  the same folder: one untimed search, then timed ones: at least --repeats, and more
+        (up to --max-repeats) until --min-timed-s seconds have been timed, so a 10 ms search
+        is not judged on three samples. The median is reported, with the fastest, the
+        slowest and the number of runs; plus peak memory and a checksum of the result rows.
 The variants rotate which goes first. A process that runs past --cap-min is stopped and
 reported as capped. Rows are compared with the first variant as a sorted multiset of (query,
 matched sequence, protein, start, edits); best match is compared on each query's edit count,
@@ -116,7 +122,7 @@ def worker(args):
   else:
     search()   # untimed: pages the indexes in
     times = []
-    for _ in range(args.repeats):
+    while len(times) < args.repeats or (sum(times) < args.min_timed_s and len(times) < args.max_repeats):
       seconds, frame = search()
       times.append(seconds)
     if build['count']:
@@ -127,7 +133,7 @@ def worker(args):
               ['Query Sequence', 'Matched Sequence', 'Protein ID', 'Index start', edits]
     rows = frame.select(columns).unique() if args.mode == 'best' else frame.select(columns)
     out.update(
-      warm_s=statistics.median(times), warm_min_s=min(times), warm_all=times,
+      warm_s=statistics.median(times), warm_min_s=min(times), warm_max_s=max(times), warm_runs=len(times), warm_all=times,
       rows=frame.height, hits=hits.height, queries_hit=hits['Query Sequence'].n_unique(),
       rows_sha256=hashlib.sha256(rows.sort(columns).write_csv().encode()).hexdigest(),
       peak_rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
@@ -175,7 +181,7 @@ def cut_peptides(proteins, lengths, rng):
   return peptides
 
 
-def synthetic_sets(proteins, sizes, workdir):
+def synthetic_sets(proteins, sizes, fixed, workdir):
   """{name: query file}. Written as .txt, one peptide per line."""
   folder = workdir / 'queries'
   folder.mkdir(parents=True, exist_ok=True)
@@ -190,9 +196,10 @@ def synthetic_sets(proteins, sizes, workdir):
   layout = random.Random(SEED)
   for n in sizes:
     write(f'mixed-{n}', [layout.randint(8, 25) for _ in range(n)])
-  n = sizes[min(1, len(sizes) - 1)]
-  short = max(1, n // 1000)
-  outlier = [15] * (n - short) + [8] * short
+  n = fixed
+  write(f'short-{n}', [layout.randint(5, 12) for _ in range(n)])
+  few = max(1, n // 1000)
+  outlier = [15] * (n - few) + [8] * few
   layout.shuffle(outlier)
   write(f'outlier-{n}', outlier)
   write(f'long-{n}', [layout.randint(30, 50) for _ in range(n)])
@@ -214,6 +221,7 @@ def run_worker(args, site, phase, config, index_dir, threads):
     sys.executable, str(Path(__file__).resolve()), '--worker', '--site', str(site), '--phase', phase,
     '--query', str(config['query']), '--proteome', str(config['proteome']), '--mode', config['mode'],
     '--index-dir', str(index_dir), '--repeats', str(args.repeats),
+    '--min-timed-s', str(args.min_timed_s), '--max-repeats', str(args.max_repeats),
   ]
   try:
     done = subprocess.run(command, env=env, capture_output=True, text=True, timeout=args.cap_min * 60, cwd=str(args.workdir))
@@ -231,7 +239,7 @@ def fmt(value, digits=3):
 
 def write_tables(results, names, outdir):
   reference = names[0]
-  long_header = ['set', 'queries', 'mode', 'threads', 'variant', 'warm_s', 'speedup_vs_' + reference,
+  long_header = ['set', 'queries', 'mode', 'threads', 'variant', 'warm_s', 'warm_min_s', 'warm_max_s', 'warm_runs', 'speedup_vs_' + reference,
                  'cold_s', 'build_s', 'ks', 'indexes', 'index_gb', 'peak_rss_mb', 'hits', 'identical', 'note']
   with open(outdir / 'per-length-k-long.tsv', 'w', newline='') as f:
     out = csv.writer(f, delimiter='\t')
@@ -243,7 +251,8 @@ def write_tables(results, names, outdir):
         speedup = ref['warm_s'] / v['warm_s'] if 'warm_s' in ref and v.get('warm_s') else None
         same = ('yes' if v['rows_sha256'] == ref['rows_sha256'] else 'NO') if 'rows_sha256' in v and 'rows_sha256' in ref else ''
         out.writerow([
-          r['set'], r['queries'], r['mode'], r['threads'], name, fmt(v.get('warm_s')), fmt(speedup, 2),
+          r['set'], r['queries'], r['mode'], r['threads'], name, fmt(v.get('warm_s')), fmt(v.get('warm_min_s')),
+          fmt(v.get('warm_max_s')), v.get('warm_runs', ''), fmt(speedup, 2),
           fmt(v.get('cold_s'), 2), fmt(v.get('build_s'), 2), ','.join(map(str, v.get('ks', []))), len(v.get('ks', [])),
           fmt(v['index_bytes'] / 1e9, 2) if 'index_bytes' in v else '', fmt(v.get('peak_rss_mb'), 0),
           v.get('hits', ''), same, 'capped' if v.get('capped') else ('error' if v.get('error') else ''),
@@ -284,12 +293,12 @@ def driver(args):
     small.write_text(''.join(f'>sp|S{i:05d}|S{i:05d}_HUMAN Smoke protein OS=Homo sapiens OX=9606 GN=G{i} PE=1 SV=1\n{p}\n'
                              for i, p in enumerate(proteins)))
     proteomes['human'] = small
-    sizes, args.repeats = [200], 1
+    sizes, args.fixed_size, args.repeats, args.min_timed_s = [200], 200, 1, 0
     query_sets = {}
   else:
     proteins = read_proteins(proteomes['human'])
     query_sets = {name: (BENCH / query, proteomes[proteome]) for name, (query, proteome) in PAPER_SETS.items()}
-  for name, path in synthetic_sets(proteins, sizes, args.workdir).items():
+  for name, path in synthetic_sets(proteins, sizes, args.fixed_size, args.workdir).items():
     query_sets[name] = (path, proteomes['human'])
   if args.sets:
     wanted = args.sets.split(',')
@@ -310,7 +319,8 @@ def driver(args):
     f'python      : {sys.version.split()[0]}',
     f'cpus        : {os.cpu_count()}',
     f'threads     : {args.threads}',
-    f'repeats     : {args.repeats}   cap per process: {args.cap_min} min',
+    f'repeats     : at least {args.repeats}, until {args.min_timed_s} s timed, at most {args.max_repeats}; cap per process: {args.cap_min} min',
+    f'human       : {len(proteins)} proteins, {sum(map(len, proteins))} residues ({proteomes["human"]})',
     f'variants    : {" ".join(names)}  (reference: {names[0]})',
     f'labels      : {args.labels}',
     f'configs     : {len(configs)}',
@@ -375,7 +385,10 @@ def main():
   parser.add_argument('--labels', default='', help='free text for run-info, e.g. the commits')
   parser.add_argument('--proteome', default=str(BENCH / 'proteomes' / 'human.fasta'))
   parser.add_argument('--threads', default=str(os.cpu_count()))
-  parser.add_argument('--sizes', default='1000,10000,100000')
+  parser.add_argument('--sizes', default='100,1000,10000,100000', help='query counts for the mixed sets')
+  parser.add_argument('--fixed-size', type=int, default=10000, help='query count for the other synthetic sets')
+  parser.add_argument('--min-timed-s', type=float, default=1.0)
+  parser.add_argument('--max-repeats', type=int, default=15)
   parser.add_argument('--sets', default='', help='only these sets, by name or prefix (mixed, outlier, coronavirus, ...)')
   parser.add_argument('--modes', default='')
   parser.add_argument('--repeats', type=int, default=3)
