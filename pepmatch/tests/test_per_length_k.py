@@ -41,6 +41,18 @@ def test_best_match_budgets_cover_every_budget_under_the_guarantee():
     assert budgets[len(guaranteed):] == list(range(previous + 1, length + 1))
 
 
+def test_a_best_match_round_adds_at_most_three_mismatch_levels():
+  # A long peptide's seeds guarantee many mismatches at once; searching them all in the
+  # first round is far more work than finding the closest match needs.
+  assert best_match_budgets(40)[:4] == [2, 5, 7, 9]       # 5-mers to 7, then 4-mers
+  assert best_match_budgets(15)[:3] == [2, 4, 6]          # 5-mers, 3-mers, 2-mers: one round each
+  assert best_match_budgets(9)[:4] == [0, 1, 2, 3]
+  for length in range(2, 80):
+    budgets = [-1] + best_match_budgets(length)
+    assert all(later - earlier <= 3 for earlier, later in zip(budgets, budgets[1:]))
+    assert 0 <= budgets[1] <= 2
+
+
 def corpus(seed):
   rng = random.Random(seed)
   proteins = [''.join(rng.choice(AMINO_ACIDS) for _ in range(rng.randint(40, 90))) for _ in range(12)]

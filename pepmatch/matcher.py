@@ -160,14 +160,23 @@ def k_for(length, edits):
   return min(SEARCH_KS[-1], max(SEARCH_KS[0], length // (edits + 1)))
 
 
+# The most mismatch levels one best-match round adds. A round must find every match up to
+# its budget, so a wide one checks and collects far more than the best match needs; a narrow
+# one costs another round for a peptide without a close match. Three was fastest on human.
+BEST_MATCH_STEP = 3
+
+
 def best_match_budgets(length):
   """The mismatch budgets best match tries for a peptide of `length`, in order. While the
-  recall guarantee holds, each k the peptide can use is searched once, at the largest
-  budget that k guarantees; past it, one more mismatch at a time."""
+  recall guarantee holds, a round goes as far as its k guarantees, but adds at most
+  BEST_MATCH_STEP levels: a 15-mer's three 5-mers guarantee 2 mismatches and are searched
+  once at 2, while a 40-mer's eight guarantee 7 and are searched at 2, 5 and 7. Every
+  budget is one its k guarantees, so the first round with a hit holds the closest match.
+  Past the guarantee, one more mismatch at a time."""
   budgets = []
   m = 0
   while length >= 2 * (m + 1):
-    m = length // k_for(length, m) - 1
+    m = min(length // k_for(length, m) - 1, m + BEST_MATCH_STEP - 1)
     budgets.append(m)
     m += 1
   return budgets + list(range(m, length + 1))
