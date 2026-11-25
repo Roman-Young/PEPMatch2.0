@@ -3,7 +3,7 @@ import re
 import polars as pl
 from pathlib import Path
 from Bio import SeqIO
-from .preprocessor import MAX_INDEX_K, Preprocessor, ready_index
+from .preprocessor import SEARCH_KS, ready_index
 from ._rs import rs_match, rs_discontinuous, rs_metadata, rs_match_counts, rs_indel_match
 
 VALID_OUTPUT_FORMATS = ['dataframe', 'polars', 'pandas', 'csv', 'tsv', 'xlsx', 'json']
@@ -156,8 +156,8 @@ def k_for(length, edits):
   largest that still splits it into edits + 1 disjoint k-mers, so at least one of them is
   untouched in any match (pigeonhole) and recall is complete. Floored at 2, the smallest
   index, where a peptide shorter than 2 * (edits + 1) loses that guarantee, and capped at
-  MAX_INDEX_K, the longest k-mer an index can store (a smaller k only adds seeds)."""
-  return min(MAX_INDEX_K, max(2, length // (edits + 1)))
+  5, the largest (see SEARCH_KS): a smaller k only adds seeds, so the guarantee holds."""
+  return min(SEARCH_KS[-1], max(SEARCH_KS[0], length // (edits + 1)))
 
 
 def best_match_budgets(length):
@@ -339,14 +339,6 @@ class Matcher:
     lengths = {len(seq) for _, seq in self.query}
     ks = set(index_ks(lengths, max(self.max_mismatches, self.max_indels), self.best_match))
     return sorted(ks | {2} if self.discontinuous_epitopes else ks)
-
-  def preprocess(self):
-    """Build every index this search will read, without searching, and return their paths.
-    Indexes that are already there and match the FASTA are kept. match() does the same on
-    first use; this is for building ahead of time."""
-    return Preprocessor(
-      self.proteome_file, self.proteome_name, self.preprocessed_files_path
-    ).preprocess_all(self.index_ks())
 
   def match(self):
     """Run the search, returning a DataFrame or writing the results to `output_name`."""

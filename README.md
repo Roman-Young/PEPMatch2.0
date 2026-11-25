@@ -46,42 +46,29 @@ print(df)
 
 ### K-mer size
 
-There is no k to choose. Each query peptide is searched at its own k, the largest that still guarantees complete recall for its length and edit budget: `length // (mismatches + 1)`, between 2 and 16. A batch of mixed lengths is split by k, so a short peptide never slows down a long one, and the results come back in the order the queries were given. `Matcher` builds a `.pepidx` index for each k it needs the first time and reuses it afterwards.
+There is no k to choose. Each query peptide is searched at its own k: `length // (mismatches + 1)`, between 2 and 5. That is the largest seed that still guarantees complete recall for its length and edit budget, capped at 5 because longer seeds do not make a search faster. A batch of mixed lengths is split by k, so a short peptide never slows down a long one, and the results come back in the order the queries were given.
+
+A proteome therefore needs at most four `.pepidx` indexes (k = 2, 3, 4 and 5), about 1.1 GB for the human proteome. `Matcher` builds the ones a search needs the first time and reuses them afterwards.
 
 ### Preprocessing
 
-Preprocessing is optional: `Matcher` builds any index it is missing on first use. To build ahead of time (a cluster job, a shared proteome), describe the search and call `preprocess()` instead of `match()`. It builds exactly the indexes that search will read and keeps the ones that are already there.
+Preprocessing is optional: `Matcher` builds any index it is missing on first use. To prepare a proteome ahead of time (a cluster job, a shared proteome), build its four indexes once; every later search finds what it needs. Indexes that are already there and match the FASTA are kept.
 ```python
-from pepmatch import Matcher
+from pepmatch import Preprocessor
 
-Matcher(
-  query='peptides.fasta',
-  proteome_file='human.fasta',
-  max_mismatches=2
-).preprocess()
+Preprocessor('human.fasta').preprocess()
 ```
 
-**CLI:** `pepmatch-preprocess` takes the same options as `pepmatch-match`.
+**CLI:**
 ```bash
-pepmatch-preprocess -q peptides.fasta -p human.fasta -m 2
-```
-When the queries are not known yet, give the peptide lengths to prepare for instead of a query file:
-```bash
-pepmatch-preprocess -p human.fasta -l 8-15 -m 2
+pepmatch-preprocess -p human.fasta
 ```
 
 #### Flags
 
-* `-p`, `--proteome_file` (Required): Path to the proteome FASTA file.
-* `-q`, `--query`: Path to the query file. Required unless `-l` is given.
-* `-l`, `--lengths`: Peptide lengths to prepare for, e.g. `9`, `8-15` or `8-11,15`. Required unless `-q` is given.
-* `-m`, `--max_mismatches`: Maximum number of mismatches the search will allow (default: 0).
-* `-i`, `--max_indels`: Maximum number of indels the search will allow (default: 0).
-* `-b`, `--best_match`: Prepare for best match mode.
+* `-p`, `--proteome` (Required): Path to the proteome FASTA file.
 * `-n`, `--proteome_name`: Custom name for the proteome.
 * `-P`, `--preprocessed_files_path`: Directory to save preprocessed files.
-
-A single index for one k can still be built directly with `Preprocessor('human.fasta').preprocess(k=5)`.
 
 ### Matching
 

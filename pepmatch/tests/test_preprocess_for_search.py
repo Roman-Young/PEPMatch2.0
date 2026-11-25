@@ -1,10 +1,11 @@
-"""Building indexes ahead of time takes the search's own options, not a k: Matcher.preprocess()
-and pepmatch-preprocess build exactly the indexes that search then reads."""
+"""Preprocessing takes no k. A search reads only the indexes in SEARCH_KS (k = 2 to 5), so
+building those once prepares a proteome for every search: any lengths, any mode."""
 import sys
 
 import pytest
-from pepmatch import Matcher
-from pepmatch.matcher import index_ks
+from pepmatch import Matcher, Preprocessor
+from pepmatch.matcher import index_ks, k_for
+from pepmatch.preprocessor import SEARCH_KS
 from pepmatch.shell import run_matcher, run_preprocessor
 
 FASTA = (
@@ -13,7 +14,8 @@ FASTA = (
   '>sp|P22222|BBBB_HUMAN Beta protein OS=Homo sapiens OX=9606 GN=BBB PE=1 SV=1\n'
   'MSDNGPQNQRNAPRITFGGPSDSTGSNQNGERSGARSKQRRPQGLPNNTASWFTALTQHGKEDLKFPRGQ\n'
 )
-QUERIES = ['MKTAYIAK', 'QISFVKSHF', 'SDNGPQNQRNAPRIT', 'LIEVQAPILSRVGDGTQDNLSGAEK']
+QUERIES = ['MKT', 'MKTAYIAK', 'QISFVKSHF', 'SDNGPQNQRNAPRIT', 'LIEVQAPILSRVGDGTQDNLSGAEK',
+           'RQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQ', 'M1, K2, A4']
 
 
 def setup(tmp_path):
@@ -28,115 +30,104 @@ def built(tmp_path):
   return sorted(int(p.name.split('_')[1].removesuffix('mers.pepidx')) for p in tmp_path.glob('*.pepidx'))
 
 
-def cli(monkeypatch, *argv):
-  monkeypatch.setattr(sys, 'argv', list(argv))
-
-
-def test_index_ks_is_one_k_per_distinct_rule_result():
-  assert index_ks([9]) == [9]
-  assert index_ks([8, 9, 15, 25], 2) == [2, 3, 5, 8]
-  assert index_ks(range(8, 16), 2) == [2, 3, 4, 5]
-  assert index_ks([40, 50]) == [16]                    # capped at the longest index
-  assert index_ks([9], best_match=True) == [2, 3, 4, 9]
+def test_no_search_reads_an_index_outside_the_search_ks():
+  assert SEARCH_KS == (2, 3, 4, 5)
+  for length in range(1, 80):
+    for edits in range(8):
+      assert k_for(length, edits) in SEARCH_KS
+    assert set(index_ks([length], best_match=True)) <= set(SEARCH_KS)
+  assert index_ks([9]) == [5] and index_ks([4]) == [4]
+  assert index_ks([8, 9, 15, 25], 2) == [2, 3, 5]
+  assert index_ks([40, 50]) == [5]
   assert index_ks([]) == []
 
 
 @pytest.mark.parametrize('options', [
-  {}, {'max_mismatches': 1}, {'max_mismatches': 3}, {'max_indels': 1}, {'max_indels': 2},
+  {}, {'max_mismatches': 1}, {'max_mismatches': 2}, {'max_mismatches': 3},
   {'best_match': True}, {'max_mismatches': 2, 'counts_only': True},
 ])
-def test_preprocess_builds_exactly_what_the_search_reads(tmp_path, capsys, options):
+def test_preprocess_leaves_nothing_for_any_search_to_build(tmp_path, capsys, options):
   fasta, queries = setup(tmp_path)
-  matcher = Matcher(str(queries), str(fasta), preprocessed_files_path=str(tmp_path), **options)
-  paths = matcher.preprocess()
-  assert built(tmp_path) == matcher.index_ks() and len(paths) == len(matcher.index_ks())
+  paths = Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path)).preprocess()
+  assert built(tmp_path) == [2, 3, 4, 5] and len(paths) == 4
   capsys.readouterr()
-  matcher.match()
-  assert 'No preprocessed file' not in capsys.readouterr().out   # nothing left for the search to build
-  assert built(tmp_path) == matcher.index_ks()
+  Matcher(str(queries), str(fasta), preprocessed_files_path=str(tmp_path), **options).match()
+  assert 'No preprocessed file' not in capsys.readouterr().out
+  assert built(tmp_path) == [2, 3, 4, 5]
 
 
-def test_preprocess_matches_a_search_that_builds_on_first_use(tmp_path):
+@pytest.mark.parametrize('indels', [1, 2])
+def test_preprocess_leaves_nothing_for_an_indel_search_to_build(tmp_path, capsys, indels):
+  fasta, _ = setup(tmp_path)
+  Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path)).preprocess()
+  capsys.readouterr()
+  Matcher(QUERIES[:-1], str(fasta), max_indels=indels, preprocessed_files_path=str(tmp_path)).match()
+  assert 'No preprocessed file' not in capsys.readouterr().out
+  assert built(tmp_path) == [2, 3, 4, 5]
+
+
+def test_preprocess_builds_what_a_search_builds_on_first_use(tmp_path):
   fasta, queries = setup(tmp_path)
   (tmp_path / 'a').mkdir()
   (tmp_path / 'b').mkdir()
-  Matcher(str(queries), str(fasta), 2, preprocessed_files_path=str(tmp_path / 'a')).preprocess()
+  Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path / 'a')).preprocess()
   Matcher(str(queries), str(fasta), 2, preprocessed_files_path=str(tmp_path / 'b')).match()
-  assert built(tmp_path / 'a') == built(tmp_path / 'b')
-  for index in (tmp_path / 'a').glob('*.pepidx'):
-    assert index.read_bytes() == (tmp_path / 'b' / index.name).read_bytes()
+  assert set(built(tmp_path / 'b')) <= set(built(tmp_path / 'a'))
+  for index in (tmp_path / 'b').glob('*.pepidx'):
+    assert index.read_bytes() == (tmp_path / 'a' / index.name).read_bytes()
 
 
 def test_preprocess_keeps_indexes_that_are_already_current(tmp_path, capsys):
-  fasta, queries = setup(tmp_path)
-  matcher = Matcher(str(queries), str(fasta), 1, preprocessed_files_path=str(tmp_path))
-  matcher.preprocess()
+  fasta, _ = setup(tmp_path)
+  preprocessor = Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path))
+  preprocessor.preprocess()
   before = {p.name: p.stat().st_mtime_ns for p in tmp_path.glob('*.pepidx')}
   capsys.readouterr()
-  matcher.preprocess()
+  preprocessor.preprocess()
   out = capsys.readouterr().out
   assert 'No preprocessed file' not in out and 'indexes ready' in out
   assert before == {p.name: p.stat().st_mtime_ns for p in tmp_path.glob('*.pepidx')}
 
 
-def test_discontinuous_epitopes_need_the_2mer_index(tmp_path):
+def test_preprocess_rebuilds_after_the_fasta_changes(tmp_path, capsys):
   fasta, _ = setup(tmp_path)
-  matcher = Matcher(['M1, K2, A4', 'QISFVKSHF'], str(fasta), preprocessed_files_path=str(tmp_path))
-  assert matcher.index_ks() == [2, 9]
-  matcher.preprocess()
-  assert built(tmp_path) == [2, 9]
-
-
-def test_cli_preprocess_takes_the_search_command_line(tmp_path, monkeypatch, capsys):
-  fasta, queries = setup(tmp_path)
-  search = ['-q', str(queries), '-p', str(fasta), '-m', '2', '-P', str(tmp_path)]
-  cli(monkeypatch, 'pepmatch-preprocess', *search)
-  run_preprocessor()
-  assert built(tmp_path) == [2, 3, 5, 8]
+  preprocessor = Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path))
+  preprocessor.preprocess()
+  fasta.write_text(FASTA + '>sp|P33333|CCCC_HUMAN Gamma OS=Homo sapiens OX=9606 GN=CCC PE=1 SV=1\nMKTAYIAKQWWWWW\n')
   capsys.readouterr()
-  cli(monkeypatch, 'pepmatch-match', *search, '-o', str(tmp_path / 'out'))
-  run_matcher()
-  assert 'No preprocessed file' not in capsys.readouterr().out
-  assert built(tmp_path) == [2, 3, 5, 8]
+  preprocessor.preprocess()
+  assert capsys.readouterr().out.count('changed since') == 4
+  df = Matcher(['KQWWWWW'], str(fasta), preprocessed_files_path=str(tmp_path)).match()
+  assert df['Protein ID'].to_list() == ['P33333.1']
 
 
-@pytest.mark.parametrize('lengths, flags, expected', [
-  ('9', [], [9]),
-  ('8-15', ['-m', '2'], [2, 3, 4, 5]),
-  ('8-11,15', ['-i', '1'], [4, 5, 7]),
-  ('9', ['-b'], [2, 3, 4, 9]),
-])
-def test_cli_preprocess_by_lengths_when_there_is_no_query_yet(tmp_path, monkeypatch, lengths, flags, expected):
+def test_preprocess_with_a_k_still_builds_that_one_index(tmp_path):
   fasta, _ = setup(tmp_path)
-  cli(monkeypatch, 'pepmatch-preprocess', '-p', str(fasta), '-l', lengths, *flags, '-P', str(tmp_path), '-n', 'named')
-  run_preprocessor()
-  assert built(tmp_path) == expected
-  assert all(p.name.startswith('named_') for p in tmp_path.glob('*.pepidx'))
-
-
-def test_cli_preprocess_still_reads_the_old_proteome_flag(tmp_path, monkeypatch):
-  fasta, _ = setup(tmp_path)
-  cli(monkeypatch, 'pepmatch-preprocess', '--proteome', str(fasta), '-l', '9', '-P', str(tmp_path))
-  run_preprocessor()
+  Preprocessor(str(fasta), preprocessed_files_path=str(tmp_path)).preprocess(k=9)
   assert built(tmp_path) == [9]
 
 
-@pytest.mark.parametrize('argv', [
-  ['-k', '5'],                                   # there is no k to give any more
-  [],                                            # neither a query nor lengths
-  ['-q', 'q.txt', '-l', '9'],                    # both
-  ['-l', '0'], ['-l', '9-'], ['-l', 'nine'], ['-l', '15-8'],
+def test_cli_preprocess_takes_only_the_proteome(tmp_path, monkeypatch, capsys):
+  fasta, queries = setup(tmp_path)
+  monkeypatch.setattr(sys, 'argv', ['pepmatch-preprocess', '-p', str(fasta), '-P', str(tmp_path), '-n', 'named'])
+  run_preprocessor()
+  assert sorted(p.name for p in tmp_path.glob('*.pepidx')) == [f'named_{k}mers.pepidx' for k in (2, 3, 4, 5)]
+  capsys.readouterr()
+  monkeypatch.setattr(sys, 'argv', ['pepmatch-match', '-q', str(queries), '-p', str(fasta), '-m', '2',
+                                    '-P', str(tmp_path), '-n', 'named', '-o', str(tmp_path / 'out')])
+  run_matcher()
+  assert 'No preprocessed file' not in capsys.readouterr().out
+  assert len(list(tmp_path.glob('*.pepidx'))) == 4
+
+
+@pytest.mark.parametrize('command, argv', [
+  (run_preprocessor, ['-k', '5']),
+  (run_matcher, ['-q', 'q.txt', '-k', '5']),
 ])
-def test_cli_preprocess_rejects_a_bad_command_line(tmp_path, monkeypatch, argv):
+def test_cli_has_no_k_option(tmp_path, monkeypatch, command, argv):
   fasta, _ = setup(tmp_path)
-  cli(monkeypatch, 'pepmatch-preprocess', '-p', str(fasta), '-P', str(tmp_path), *argv)
+  monkeypatch.chdir(tmp_path)
+  monkeypatch.setattr(sys, 'argv', ['pepmatch', '-p', str(fasta), '-P', str(tmp_path), *argv])
   with pytest.raises(SystemExit):
-    run_preprocessor()
+    command()
   assert built(tmp_path) == []
-
-
-def test_cli_preprocess_by_lengths_checks_the_search_options(tmp_path, monkeypatch):
-  fasta, _ = setup(tmp_path)
-  cli(monkeypatch, 'pepmatch-preprocess', '-p', str(fasta), '-l', '9', '-m', '1', '-i', '1', '-P', str(tmp_path))
-  with pytest.raises(ValueError, match='mutually exclusive'):
-    run_preprocessor()

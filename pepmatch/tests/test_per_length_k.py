@@ -15,14 +15,14 @@ AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY'
 
 
 def test_k_is_the_largest_that_keeps_edits_plus_one_disjoint_seeds():
-  assert [k_for(9, e) for e in range(5)] == [9, 4, 3, 2, 2]
-  assert [k_for(15, e) for e in range(5)] == [15, 7, 5, 3, 3]
-  assert k_for(40, 0) == k_for(40, 1) == 16     # capped at the longest k-mer an index stores
+  assert [k_for(9, e) for e in range(5)] == [5, 4, 3, 2, 2]
+  assert [k_for(15, e) for e in range(5)] == [5, 5, 5, 3, 3]
+  assert k_for(40, 0) == k_for(40, 1) == k_for(40, 7) == 5     # capped at the largest search index
   assert k_for(3, 2) == 2                        # floored at the smallest index
   for length in range(2, 60):
     for edits in range(6):
       k = k_for(length, edits)
-      assert 2 <= k <= 16
+      assert 2 <= k <= 5
       if length >= 2 * (edits + 1):
         assert length // k >= edits + 1          # the pigeonhole guarantee
 
@@ -105,11 +105,9 @@ def test_each_length_is_searched_at_its_own_k(tmp_path, capsys):
   capsys.readouterr()
   df = search(fasta, tmp_path, queries, max_mismatches=1)
   out = capsys.readouterr().out
-  assert 'Searching 2 peptides against proteome (k=4,' in out     # the two 8-mers
-  assert 'Searching 1 peptides against proteome (k=7,' in out     # the 15-mer
-  assert 'Searching 1 peptides against proteome (k=12,' in out    # the 24-mer
-  assert sorted(p.name for p in tmp_path.glob('*.pepidx')) == [
-    'proteome_12mers.pepidx', 'proteome_4mers.pepidx', 'proteome_7mers.pepidx']
+  assert 'Searching 2 peptides against proteome (k=4,' in out     # the two 8-mers: 8 // 2
+  assert 'Searching 2 peptides against proteome (k=5,' in out     # the 15-mer and the 24-mer, capped
+  assert sorted(p.name for p in tmp_path.glob('*.pepidx')) == ['proteome_4mers.pepidx', 'proteome_5mers.pepidx']
   assert df.filter(pl.col('Mismatches') == 0)['Query Sequence'].unique(maintain_order=True).to_list() == queries
 
 
@@ -121,7 +119,7 @@ def test_a_short_query_does_not_change_how_a_long_one_is_searched(tmp_path, caps
   capsys.readouterr()
   search(fasta, tmp_path, [long_query, 'ACDE'], max_mismatches=1)
   out = capsys.readouterr().out
-  assert '(k=10,' in out and '(k=2,' in out
+  assert '(k=5,' in out and '(k=2,' in out
 
 
 def test_only_queries_too_short_for_two_mer_seeds_lose_the_guarantee(tmp_path, capsys):

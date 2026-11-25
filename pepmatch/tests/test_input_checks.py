@@ -49,8 +49,8 @@ def damage(index, how):
 @pytest.mark.parametrize('how', ['truncated', 'empty', 'foreign', 'one byte short'])
 def test_a_damaged_index_raises_a_clear_error(tmp_path, how):
   path = proteome(tmp_path)
-  Preprocessor(str(path), preprocessed_files_path=str(tmp_path)).preprocess(9)
-  damage(tmp_path / 'proteome_9mers.pepidx', how)
+  Preprocessor(str(path), preprocessed_files_path=str(tmp_path)).preprocess(5)
+  damage(tmp_path / 'proteome_5mers.pepidx', how)
   with pytest.raises(ValueError, match='Delete it and PEPMatch will rebuild it'):
     search(path, tmp_path, ['MKTAYIAKQ'])
 
@@ -58,8 +58,8 @@ def test_a_damaged_index_raises_a_clear_error(tmp_path, how):
 def test_an_index_holding_another_k_raises(tmp_path):
   path = proteome(tmp_path)
   Preprocessor(str(path), preprocessed_files_path=str(tmp_path)).preprocess(3)
-  os.replace(tmp_path / 'proteome_3mers.pepidx', tmp_path / 'proteome_9mers.pepidx')
-  with pytest.raises(ValueError, match='holds 3-mers, not 9-mers'):
+  os.replace(tmp_path / 'proteome_3mers.pepidx', tmp_path / 'proteome_5mers.pepidx')
+  with pytest.raises(ValueError, match='holds 3-mers, not 5-mers'):
     search(path, tmp_path, ['MKTAYIAKQ'])
 
 
@@ -70,12 +70,12 @@ def test_a_missing_proteome_raises_file_not_found(tmp_path):
 
 def test_an_existing_index_still_works_without_its_fasta(tmp_path):
   path = proteome(tmp_path)
-  Preprocessor(str(path), preprocessed_files_path=str(tmp_path)).preprocess(9)
+  Preprocessor(str(path), preprocessed_files_path=str(tmp_path)).preprocess(5)
   path.unlink()
   assert hits(search(path, tmp_path, ['MKTAYIAKQ'])) == [('MKTAYIAKQ', 'P11111.1', 1)]
 
 
-def build(path, tmp_path, k=9):
+def build(path, tmp_path, k=5):
   Preprocessor(str(path), preprocessed_files_path=str(tmp_path)).preprocess(k)
   return tmp_path / f'{path.stem}_{k}mers.pepidx'
 
@@ -92,7 +92,7 @@ GAMMA = '>sp|P33333|C_HUMAN Gamma OS=Homo sapiens OX=9606 GN=CCC PE=1 SV=1\nGGGG
 def test_building_an_index_records_its_fasta(tmp_path):
   path = proteome(tmp_path)
   index = build(path, tmp_path)
-  record = json.loads((tmp_path / 'proteome_9mers.pepidx.source').read_text())
+  record = json.loads((tmp_path / 'proteome_5mers.pepidx.source').read_text())
   assert record['fasta_size'] == os.path.getsize(path)
   assert record['fasta_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
   assert index.is_file()
@@ -118,7 +118,7 @@ def test_a_fasta_with_the_same_content_and_a_new_time_is_not_rebuilt(tmp_path, c
   assert hits(search(path, tmp_path, ['MKTAYIAKQ'])) == [('MKTAYIAKQ', 'P11111.1', 1)]
   assert 'building' not in capsys.readouterr().out
   assert os.stat(index).st_mtime_ns == built
-  record = json.loads((tmp_path / 'proteome_9mers.pepidx.source').read_text())
+  record = json.loads((tmp_path / 'proteome_5mers.pepidx.source').read_text())
   assert record['fasta_mtime_ns'] == os.stat(path).st_mtime_ns
 
 
@@ -133,19 +133,19 @@ def test_an_index_without_a_record_is_kept_when_its_counts_match(tmp_path, capsy
   # Indexes built before records existed have none.
   path = proteome(tmp_path)
   index = build(path, tmp_path)
-  (tmp_path / 'proteome_9mers.pepidx.source').unlink()
+  (tmp_path / 'proteome_5mers.pepidx.source').unlink()
   later(path)
   built = os.stat(index).st_mtime_ns
   capsys.readouterr()
   search(path, tmp_path, ['MKTAYIAKQ'])
   assert 'building' not in capsys.readouterr().out and os.stat(index).st_mtime_ns == built
-  assert (tmp_path / 'proteome_9mers.pepidx.source').is_file()
+  assert (tmp_path / 'proteome_5mers.pepidx.source').is_file()
 
 
 def test_an_index_without_a_record_is_rebuilt_when_its_counts_differ(tmp_path):
   path = proteome(tmp_path)
   build(path, tmp_path)
-  (tmp_path / 'proteome_9mers.pepidx.source').unlink()
+  (tmp_path / 'proteome_5mers.pepidx.source').unlink()
   path.write_text(GAMMA)
   assert hits(search(path, tmp_path, ['MKTAYIAKQ'])) == [('MKTAYIAKQ', 'P33333.1', 5)]
 
@@ -193,7 +193,7 @@ def test_an_unsearchable_query_is_a_miss_and_does_not_stop_the_run(tmp_path, cap
 def test_an_unsearchable_query_does_not_lower_k_for_the_rest(tmp_path, capsys):
   # An empty query used to make the shortest length 0 and drag the batch down to k=2.
   search(proteome(tmp_path), tmp_path, ['MKTAYIAKQ', ''])
-  assert 'k=9' in capsys.readouterr().out
+  assert 'k=5' in capsys.readouterr().out
 
 
 def test_a_run_of_only_unsearchable_queries_returns_misses(tmp_path):
@@ -226,17 +226,17 @@ def test_a_negative_discontinuous_position_is_a_miss_with_a_warning(tmp_path, ca
 
 def test_matcher_finds_an_index_built_under_a_custom_name(tmp_path, capsys):
   path = proteome(tmp_path)
-  Preprocessor(str(path), proteome_name='custom', preprocessed_files_path=str(tmp_path)).preprocess(9)
+  Preprocessor(str(path), proteome_name='custom', preprocessed_files_path=str(tmp_path)).preprocess(5)
   capsys.readouterr()
   df = search(path, tmp_path, ['MKTAYIAKQ'], proteome_name='custom')
   assert hits(df) == [('MKTAYIAKQ', 'P11111.1', 1)]
   assert 'building' not in capsys.readouterr().out
-  assert sorted(p.name for p in tmp_path.glob('*.pepidx')) == ['custom_9mers.pepidx']
+  assert sorted(p.name for p in tmp_path.glob('*.pepidx')) == ['custom_5mers.pepidx']
 
 
 def test_the_cli_accepts_a_custom_proteome_name(tmp_path, monkeypatch):
   path = proteome(tmp_path)
-  Preprocessor(str(path), proteome_name='custom', preprocessed_files_path=str(tmp_path)).preprocess(9)
+  Preprocessor(str(path), proteome_name='custom', preprocessed_files_path=str(tmp_path)).preprocess(5)
   queries = tmp_path / 'q.txt'
   queries.write_text('MKTAYIAKQ\n')
   out = tmp_path / 'out'
@@ -246,4 +246,4 @@ def test_the_cli_accepts_a_custom_proteome_name(tmp_path, monkeypatch):
   ])
   run_matcher()
   assert pl.read_csv(f'{out}.csv')['Protein ID'].to_list() == ['P11111.1']
-  assert sorted(p.name for p in tmp_path.glob('*.pepidx')) == ['custom_9mers.pepidx']
+  assert sorted(p.name for p in tmp_path.glob('*.pepidx')) == ['custom_5mers.pepidx']

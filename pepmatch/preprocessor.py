@@ -9,6 +9,12 @@ from ._rs import rs_preprocess
 # built for k above 16.
 MAX_INDEX_K = 16
 
+# Every k a search reads an index for. A peptide is searched at the largest of these that
+# still splits it into edits + 1 seeds (matcher.k_for). Seeds longer than 5 residues find
+# nothing faster in a proteome: a 5-mer already occurs only a handful of times, so a larger k
+# would add an index and a separate search for no gain (measured on human, caps 4 to 16).
+SEARCH_KS = (2, 3, 4, 5)
+
 # The .pepidx header: magic, k, protein count, sequence length, unique k-mers, positions,
 # metadata length. Every section's size follows from it (see preprocess.rs write_pepidx).
 PEPIDX_MAGIC = b'PEPIDX05'
@@ -175,23 +181,20 @@ class Preprocessor:
   def index_path(self, k):
     return os.path.join(self.preprocessed_files_path, f'{self.proteome_name}_{k}mers.pepidx')
 
-  def preprocess_all(self, ks):
-    """Make sure the index for every k in `ks` is ready, building only the ones that are
-    missing or older than the FASTA's content, and return their paths."""
-    ks = sorted(set(ks))
-    paths = [ready_index(self.proteome_file, self.index_path(k), k) for k in ks]
-    if paths:
+  def preprocess(self, k=None):
+    """Build every index a search can read (k in SEARCH_KS), keeping the ones that are
+    already there and match the FASTA, and return their paths. Any search of this proteome
+    then finds its index ready.
+
+    With `k`, build that one index instead, as <proteome_name>_<k>mers.pepidx, replacing
+    any index already there."""
+    if k is None:
+      paths = [ready_index(self.proteome_file, self.index_path(k), k) for k in SEARCH_KS]
       size = sum(os.path.getsize(path) for path in paths)
       size = f'{size / 1e9:.1f} GB' if size >= 1e9 else f'{size / 1e6:.1f} MB'
       print(f"{self.proteome_name} indexes ready in {self.preprocessed_files_path}: "
-            f"k={', '.join(map(str, ks))} ({len(paths)} file(s), {size})")
-    else:
-      print('No index is needed: there is nothing to search.')
-    return paths
-
-  def preprocess(self, k: int) -> None:
-    """Build the k-mer index and write it to <proteome_name>_<k>mers.pepidx, replacing any
-    index already there."""
+            f"k={', '.join(map(str, SEARCH_KS))} ({len(paths)} files, {size})")
+      return paths
     if k < 2:
       raise ValueError('k must be >= 2.')
     if k > MAX_INDEX_K:

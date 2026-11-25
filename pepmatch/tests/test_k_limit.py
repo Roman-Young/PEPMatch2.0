@@ -1,12 +1,13 @@
 import random
+import re
 import pytest
 
 from pepmatch import Matcher, Preprocessor
 from indel2_brute_force import brute_force_search
 
-# The index packs each k-mer into 16 bytes. Auto-k is the shortest query's length divided
-# by (edits + 1), so before the cap any batch of long enough queries asked for a 17-mer index
-# and the preprocessor panicked; best_match started from the shortest query's full length.
+# A query is searched at k = length // (edits + 1), capped at 5 (SEARCH_KS): a long query
+# never asks for a longer index, and capping only adds seeds, so recall stays complete. The
+# index format itself stores k-mers up to 16 residues.
 PROTEIN = 'GGGGMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQGGGG'
 AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY'
 
@@ -28,17 +29,19 @@ def search(tmp_path, proteome, **kwargs):
 
 
 @pytest.mark.parametrize('length, kwargs', [
-  (17, {}),                        # exact: auto-k was the full 17
+  (17, {}),
   (30, {}),
   (34, {'max_mismatches': 1}),     # 34 // 2 = 17
-  (17, {'best_match': True}),      # best_match started at the shortest query's length
-  (34, {'max_indels': 1}),         # 34 // 2 = 17
+  (17, {'best_match': True}),
+  (34, {'max_indels': 1}),
   (51, {'max_indels': 2}),         # 51 // 3 = 17
 ])
-def test_long_query_is_found_with_k_capped_at_16(tmp_path, proteome, capsys, length, kwargs):
+def test_long_query_is_found_with_k_capped_at_5(tmp_path, proteome, capsys, length, kwargs):
   df = search(tmp_path, proteome, query=[window(length)], **kwargs)
   assert window(length) in df['Matched Sequence'].to_list()
-  assert 'k=16' in capsys.readouterr().out
+  out = capsys.readouterr().out
+  assert 'k=5' in out and not re.search(r'k=([6-9]|1\d)\b', out)
+  assert not [p.name for p in tmp_path.glob('*.pepidx') if int(re.search(r'_(\d+)mers', p.name)[1]) > 5]
 
 
 def test_counts_only_long_query(tmp_path, proteome):
@@ -47,8 +50,10 @@ def test_counts_only_long_query(tmp_path, proteome):
 
 
 def test_k_below_the_cap_is_unchanged(tmp_path, proteome, capsys):
-  search(tmp_path, proteome, query=[window(16)])
-  assert '(k=16,' in capsys.readouterr().out
+  search(tmp_path, proteome, query=[window(4)])
+  assert '(k=4,' in capsys.readouterr().out
+  search(tmp_path, proteome, query=[window(9)], max_mismatches=2)
+  assert '(k=3,' in capsys.readouterr().out
 
 
 def test_preprocessor_rejects_k_above_16(tmp_path, proteome):
