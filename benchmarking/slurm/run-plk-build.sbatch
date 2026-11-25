@@ -15,7 +15,7 @@
 set -euo pipefail
 REPO="$HOME/projects/pepmatch/PEPMatch2.0"
 : "${RUN_DIR:?submit through submit-plk-pipeline.sh, which sets RUN_DIR}"
-: "${BASE_COMMIT:?}" "${HEAD_COMMIT:?}" "${CAPS:?}"
+: "${BASE_COMMIT:?}" "${HEAD_COMMIT:?}" "${CAPS?}"
 cd "$REPO"
 source "$HOME/projects/pepmatch/env.sh"
 
@@ -43,8 +43,16 @@ build() {   # build <commit> <name>
 build "$BASE_COMMIT" base
 build "$HEAD_COMMIT" head
 grep -q "k=0" "$RUN_DIR/src-base/pepmatch/matcher.py" || { echo "FATAL: base has no k option; wrong BASE_COMMIT." >&2; exit 1; }
+# Report the k head searches at, from inside the copy (python -c looks in the current folder
+# first, and the repo root where this job starts has its own pepmatch/).
+(cd "$RUN_DIR/site-head" && PYTHONPATH="$RUN_DIR/site-head" python3 -c "
+import pepmatch.matcher as m
+assert m.__file__.startswith('$RUN_DIR/site-head'), m.__file__
+print('head : k for a 40-mer exact / 9-mer exact / 40-mer at 3 mm =', [m.k_for(40, 0), m.k_for(9, 0), m.k_for(40, 3)])")
 RULE='  return min(MAX_INDEX_K, max(2, length // (edits + 1)))'
-grep -qxF "$RULE" "$RUN_DIR/site-head/pepmatch/matcher.py" || { echo "FATAL: head's k rule line not found; wrong HEAD_COMMIT." >&2; exit 1; }
+if [[ -n "$CAPS" ]]; then
+  grep -qxF "$RULE" "$RUN_DIR/site-head/pepmatch/matcher.py" || { echo "FATAL: CAPS given but head's k rule line is not the uncapped one; wrong HEAD_COMMIT." >&2; exit 1; }
+fi
 
 for cap in $CAPS; do
   site="$RUN_DIR/site-cap$cap"

@@ -304,12 +304,15 @@ def driver(args):
     wanted = args.sets.split(',')
     query_sets = {name: v for name, v in query_sets.items() if any(name == w or name.startswith(w + '-') for w in wanted)}
   modes = args.modes.split(',') if args.modes else list(MODES)
+  skip = {tuple(item.split(':')) for item in args.skip.split(',') if item}
 
   configs = []
   for name, (query, proteome) in query_sets.items():
     n = count_queries(query)
     for mode in modes:
       if mode == 'best' and n > args.best_max:
+        continue
+      if (name.split('-')[0], mode) in skip:
         continue
       for threads in threads_list:
         configs.append({'set': name, 'queries': n, 'mode': mode, 'threads': threads, 'query': query, 'proteome': proteome})
@@ -391,6 +394,9 @@ def main():
   parser.add_argument('--max-repeats', type=int, default=15)
   parser.add_argument('--sets', default='', help='only these sets, by name or prefix (mixed, outlier, coronavirus, ...)')
   parser.add_argument('--modes', default='')
+  parser.add_argument('--skip', default='short:mm3', help='set-prefix:mode pairs to leave out. short:mm3 is '
+                      'left out by default: 5-12-mers at 3 mismatches match a large share of the proteome '
+                      'and ran out of memory in every build (2026-11-16)')
   parser.add_argument('--repeats', type=int, default=3)
   parser.add_argument('--cap-min', type=float, default=30)
   parser.add_argument('--best-max', type=int, default=10000)

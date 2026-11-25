@@ -16,11 +16,14 @@ REPO="$HOME/projects/pepmatch/PEPMatch2.0"
 : "${RUN_DIR:?submit through submit-plk-pipeline.sh, which sets RUN_DIR}"
 EXTRA="${EXTRA:-}"
 THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-1},8}"
-: "${CAPS:?submit through submit-plk-pipeline.sh, which sets CAPS}"
+: "${CAPS?submit through submit-plk-pipeline.sh, which sets CAPS}"
+# No CAPS: compare base with head as committed. With CAPS: one copy of head per ceiling.
 VARIANTS=""
 for cap in $CAPS; do VARIANTS="$VARIANTS --variant cap$cap=$RUN_DIR/site-cap$cap"; done
+[[ -z "$CAPS" ]] && VARIANTS="--variant head=$RUN_DIR/site-head"
 
-echo "=== per-length k ceilings vs one k per batch: caps $CAPS ==="
+WHAT="head as committed"; [[ -n "$CAPS" ]] && WHAT="caps $CAPS"
+echo "=== per-length k vs one k per batch: $WHAT ==="
 echo "job     : ${SLURM_JOB_ID:-manual}"
 echo "host    : $(hostname)"
 echo "run dir : $RUN_DIR"
@@ -37,7 +40,7 @@ cp "$REPO/benchmarking/proteomes/human.fasta" "$SCRATCH/"
 python3 "$REPO/benchmarking/scripts/time-per-length-k.py" \
   --workdir "$SCRATCH" --outdir "$RUN_DIR" --proteome "$SCRATCH/human.fasta" \
   --variant "base=$RUN_DIR/site-base" $VARIANTS \
-  --labels "base $(cat "$RUN_DIR/base-commit.txt"), caps from $(cat "$RUN_DIR/head-commit.txt")" \
+  --labels "base $(cat "$RUN_DIR/base-commit.txt"), head $(cat "$RUN_DIR/head-commit.txt")${CAPS:+, caps $CAPS}" \
   --threads "$THREADS" $EXTRA
 
 echo

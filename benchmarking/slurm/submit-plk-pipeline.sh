@@ -1,16 +1,19 @@
 #!/bin/bash
 # Submit the per-length-k comparison as two chained SLURM steps:
 #
-#   plk-build (base + head, one copy of head per cap)  --afterok-->  plk-timing (one node)
+#   plk-build (base + head)  --afterok-->  plk-timing (one node)
 #
-# base = one k per batch (master + PRs #39-#42); capN = every query at its own k, at most N.
+# base = one k per batch (master + PRs #39-#42); head = the per-length design as committed
+# (every query at its own k, at most 5; best match adds at most 3 mismatch levels a round).
+# With CAPS="4 5 ..." the run instead compares base with copies of an uncapped head
+# (HEAD_COMMIT=95f857b) at each ceiling: the cap test of 2026-11-16.
 # Logs go to ~/projects/pepmatch/slurm-logs/ and results to
 # ~/projects/pepmatch/results/per-length-k-<stamp>/, both outside the repo.
 #
 # Usage (from the repo root, on branch bench/per-length-k, after `git fetch origin`):
 #     SMOKE=1 bash benchmarking/slurm/submit-plk-pipeline.sh    # FIRST: minutes, tiny sizes
 #     bash benchmarking/slurm/submit-plk-pipeline.sh            # the real run
-# Env overrides: BASE_COMMIT, HEAD_COMMIT, CAPS (default "4 5 6 7 8 10 16"), THREADS (default "64,8"),
+# Env overrides: BASE_COMMIT, HEAD_COMMIT, CAPS (default none), THREADS (default "64,8"),
 #                EXTRA (more script flags, e.g. EXTRA="--sets mixed,coronavirus --modes mm2").
 set -euo pipefail
 
@@ -19,8 +22,8 @@ BASE="$HOME/projects/pepmatch"
 LOGS="$BASE/slurm-logs"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 export BASE_COMMIT="${BASE_COMMIT:-172207f}"
-export HEAD_COMMIT="${HEAD_COMMIT:-95f857b}"
-export CAPS="${CAPS:-4 5 6 7 8 10 16}"
+export HEAD_COMMIT="${HEAD_COMMIT:-6d4f834}"
+export CAPS="${CAPS-}"
 if [[ "${SMOKE:-0}" == "1" ]]; then
   export RUN_DIR="$BASE/results/per-length-k-smoke-$STAMP"
   export EXTRA="--smoke ${EXTRA:-}"
@@ -38,7 +41,7 @@ timing=$(sbatch --parsable --export=ALL --dependency=afterok:"$build" ${TIME[@]+
          --output="$LOGS/%x-%j.out" --error="$LOGS/%x-%j.err" "$SLURM_DIR/run-plk-timing.sbatch")
 
 [[ "${SMOKE:-0}" == "1" ]] && MODE=" (SMOKE)" || MODE=""
-echo "per-length k ceilings${MODE}: base $BASE_COMMIT vs caps [$CAPS] of $HEAD_COMMIT"
+echo "per-length k${MODE}: base $BASE_COMMIT vs head $HEAD_COMMIT${CAPS:+ at caps [$CAPS]}"
 echo "  build   = $build"
 echo "  timing  = $timing  (held on $build)"
 echo "  results = $RUN_DIR"
